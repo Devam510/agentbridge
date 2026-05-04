@@ -59,7 +59,18 @@ export default function MarketplacePage() {
 
       <div className="marketplace-grid">
         {filtered.map((app) => (
-          <div key={app.name} className="app-card" onClick={() => window.location.href=`/create?url=https://${app.name.toLowerCase().replace(/\s/g,'')}.com`}>
+          <div key={app.name} className="app-card" onClick={() => {
+            let realUrl = `https://${app.name.toLowerCase().replace(/\s/g,'')}.com`;
+            if (app.name === 'Google Calendar') realUrl = 'https://calendar.google.com';
+            if (app.name === 'Google Drive') realUrl = 'https://drive.google.com';
+            if (app.name === 'Google Docs') realUrl = 'https://docs.google.com';
+            if (app.name === 'Google Sheets') realUrl = 'https://sheets.google.com';
+            if (app.name === 'Google Meet') realUrl = 'https://meet.google.com';
+            if (app.name === 'GitHub') realUrl = 'https://github.com';
+            if (app.name === 'Notion AI') realUrl = 'https://notion.so';
+            if (app.name === 'AWS Console') realUrl = 'https://console.aws.amazon.com';
+            window.location.href = `/create?url=${realUrl}`;
+          }}>
             <div className="app-icon">{app.icon}</div>
             <div>
               <div className="app-name">{app.name}</div>
