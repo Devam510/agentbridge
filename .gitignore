@@ -1,0 +1,28 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+
+# Ignore all generated bridges
+bridges/*
+!bridges/.gitkeep
+
+# Ignore tasks directory as requested by user
+tasks/
+
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.key
+*.pem
+*.p12
+*.secret
+
+coverage/
+.playwright/
+playwright-report/
+.next/

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AgentBridge</title>
+<style>
+  body { width: 320px; font-family: -apple-system, system-ui, sans-serif; background: #080B14; color: #F8FAFC; margin: 0; }
+  .header { display: flex; align-items: center; gap: 0.5rem; padding: 1rem; border-bottom: 1px solid rgba(255,255,255,0.07); }
+  .logo { font-size: 1rem; font-weight: 800; background: linear-gradient(135deg,#6366F1,#06B6D4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .url-bar { margin: 1rem; background: #0F1525; border: 1px solid rgba(255,255,255,0.07); border-radius: 8px; padding: 0.6rem 0.75rem; font-size: 0.8rem; color: #94A3B8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .btn { display: block; width: calc(100% - 2rem); margin: 0 1rem; padding: 0.75rem; border-radius: 10px; font-size: 0.875rem; font-weight: 700; cursor: pointer; border: none; transition: all 0.2s; }
+  .btn-primary { background: #6366F1; color: white; margin-bottom: 0.5rem; }
+  .btn-primary:hover { background: #818CF8; }
+  .btn-secondary { background: #151D30; color: #94A3B8; border: 1px solid rgba(255,255,255,0.07); margin-bottom: 1rem; }
+  .status { margin: 0.75rem 1rem; font-size: 0.78rem; color: #94A3B8; text-align: center; min-height: 1.5rem; }
+  .status.ok { color: #10B981; }
+  .status.err { color: #EF4444; }
+  .progress { height: 3px; background: #151D30; margin: 0 1rem 0.5rem; border-radius: 3px; overflow: hidden; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg,#6366F1,#06B6D4); width: 0%; transition: width 0.4s; }
+</style>
+</head>
+<body>
+<div class="header">
+  <span>⚡</span>
+  <span class="logo">AgentBridge</span>
+</div>
+<div class="url-bar" id="current-url">Loading…</div>
+<div class="progress"><div class="progress-bar" id="pbar"></div></div>
+<div class="status" id="status">Ready to bridge this site</div>
+<button class="btn btn-primary" id="bridge-btn">⚡ Bridge This Site</button>
+<button class="btn btn-secondary" id="open-dashboard">📊 Open Dashboard</button>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const pbar = document.getElementById('pbar');
+  const urlEl = document.getElementById('current-url');
+  const bridgeBtn = document.getElementById('bridge-btn');
+
+  // 1. Health check local companion
+  async function checkCompanion() {
+    try {
+      const res = await fetch('http://localhost:3001/health');
+      if (res.ok) {
+        statusEl.textContent = 'Ready to bridge this site';
+        bridgeBtn.disabled = false;
+        return true;
+      }
+    } catch (e) {
+      statusEl.textContent = 'Companion app not running. Please install it.';
+      statusEl.className = 'status err';
+      bridgeBtn.disabled = true;
+      bridgeBtn.textContent = '❌ Offline';
+      return false;
+    }
+  }
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const url = tabs[0]?.url || 'Unknown';
+    urlEl.textContent = url;
+    checkCompanion();
+  });
+
+  document.getElementById('open-dashboard').addEventListener('click', () => {
+    chrome.tabs.create({ url: 'http://localhost:3000/dashboard' });
+  });
+
+  bridgeBtn.addEventListener('click', async () => {
+    bridgeBtn.disabled = true;
+    statusEl.className = 'status';
+
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      const url = tabs[0]?.url;
+      if (!url) { statusEl.textContent = 'Could not get tab URL'; statusEl.className='status err'; bridgeBtn.disabled=false; return; }
+
+      const steps = ['Crawling…', 'Mapping capabilities…', 'Generating MCP server…', 'Deploying to Companion…'];
+      for (let i = 0; i < steps.length; i++) {
+        statusEl.textContent = steps[i];
+        pbar.style.width = `${((i+1)/steps.length)*100}%`;
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      chrome.runtime.sendMessage({ type: 'BRIDGE_SITE', url }, (response) => {
+        if (response?.success) {
+          statusEl.textContent = '✅ Bridge installed! Restart Claude.';
+          statusEl.className = 'status ok';
+          pbar.style.width = '100%';
+        } else {
+          statusEl.textContent = response?.error || 'Bridge failed';
+          statusEl.className = 'status err';
+        }
+        bridgeBtn.disabled = false;
+      });
+    });
+  });
+</script>
+</body>
+</html>
