@@ -116,11 +116,13 @@ export async function analyzeWithLLM(
   crawlResult: SiteCrawlResult,
   bridgeId: string,
 ): Promise<CapabilityMap> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const openAiKey = process.env.OPENAI_API_KEY;
+  const grokKey = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
   let rawContent = '';
 
-  if (!apiKey) {
-    console.warn('\n⚠️ OPENAI_API_KEY not found. Falling back to heuristic/mock generation mode.');
+  if (!openAiKey && !grokKey && !groqKey) {
+    console.warn('\n⚠️ No API Key found. Falling back to heuristic/mock generation mode.');
     // Generate a free deterministic fallback based on the crawl results directly.
     const capabilities = [];
     
@@ -169,12 +171,30 @@ export async function analyzeWithLLM(
     
   } else {
     // LLM mode
-    const client = new OpenAI({ apiKey });
+    const isGrok = !!grokKey;
+    const isGroq = !!groqKey;
+    
+    let baseURL = undefined;
+    let apiKey = openAiKey;
+    let model = 'gpt-4o';
+
+    if (isGroq) {
+      baseURL = 'https://api.groq.com/openai/v1';
+      apiKey = groqKey;
+      model = 'llama3-70b-8192';
+    } else if (isGrok) {
+      baseURL = 'https://api.x.ai/v1';
+      apiKey = grokKey;
+      model = 'grok-beta';
+    }
+
+    const client = new OpenAI({ apiKey, baseURL });
+    
     const prompt = buildPrompt(crawlResult);
 
     try {
       const response = await client.chat.completions.create({
-        model: 'gpt-4o',
+        model,
         messages: [
           {
             role: 'system',
