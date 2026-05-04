@@ -118,6 +118,10 @@ export async function crawlSite(
     await session.close();
   }
 
+  if (results.length === 0 && errors.length > 0) {
+    throw new Error(`Failed to crawl the website. Make sure the URL is correct and accessible. Details: ${errors[0]}`);
+  }
+
   return {
     baseUrl,
     crawledAt: new Date().toISOString(),

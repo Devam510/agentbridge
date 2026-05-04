@@ -1,1 +1,2 @@
 {"eventId":"evt_1777918046979_vxej6cu","timestamp":"2026-05-04T18:07:26.977Z","agentId":"claude-desktop","bridgeId":"googlecalendar-com","capabilityId":"general.read_page","executionPath":"browser","latencyMs":2071,"success":true}
+{"eventId":"evt_1777919995209_hjlm0ri","timestamp":"2026-05-04T18:39:55.206Z","agentId":"claude-desktop","bridgeId":"googlecalendar-com","capabilityId":"events.search","executionPath":"browser","latencyMs":880,"success":true}
