@@ -181,7 +181,7 @@ export async function analyzeWithLLM(
     if (isGroq) {
       baseURL = 'https://api.groq.com/openai/v1';
       apiKey = groqKey;
-      model = 'llama3-70b-8192';
+      model = 'llama-3.3-70b-versatile';
     } else if (isGrok) {
       baseURL = 'https://api.x.ai/v1';
       apiKey = grokKey;
