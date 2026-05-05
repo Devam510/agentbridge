@@ -105,12 +105,17 @@ function findElement(target, role) {
 // ─── ACTION IMPLEMENTATIONS ──────────────────────────────────────────────────
 
 async function performClick(target) {
-  const el = findElement(target, 'button');
-  if (!el) throw new Error(`Click target not found: "${target}"`);
-  el.click();
-  // Give the page a moment to react
-  await new Promise(r => setTimeout(r, 500));
-  return { clicked: target, pageTitle: document.title, url: window.location.href };
+  // Support pipe-separated fallback list: "Save|Submit|Create"
+  const targets = (target || '').split('|').map(t => t.trim()).filter(Boolean);
+  for (const t of targets) {
+    const el = findElement(t, 'button');
+    if (el) {
+      el.click();
+      await new Promise(r => setTimeout(r, 500));
+      return { clicked: t, pageTitle: document.title, url: window.location.href };
+    }
+  }
+  throw new Error(`Click target not found: "${target}"`);
 }
 
 async function performFill(target, value) {
