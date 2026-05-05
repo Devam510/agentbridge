@@ -1,15 +1,14 @@
 /**
  * sequence-builder.ts
  * WHY: Translates a capability + params into an ordered list of DOM actions.
- * Root cause fix: 'inferred' write capabilities were falling through to a read-only path.
- * Now uses intent detection (from capability name) to route correctly.
- * Also supports URL-parameter based creation for well-known services (Google Calendar).
+ * Phase 8C: Smart Sequence Builder (Intent-Based).
+ * Generates robust action sequences for Login, Create, Delete, Search, and read-only.
  */
 
 import { Capability } from '../inferrer/capability-map.js';
 
 export interface DOMAction {
-  type: 'navigate' | 'click' | 'fill' | 'select' | 'read' | 'submit' | 'wait';
+  type: 'navigate' | 'click' | 'fill' | 'selectOption' | 'checkBox' | 'hover' | 'pressKey' | 'waitForElement' | 'read' | 'submit' | 'wait';
   target?: string;
   value?: string;
   ms?: number;
@@ -21,28 +20,43 @@ export interface ActionSequence {
   targetUrl: string;
 }
 
-// Detects write/mutate intent from capability name or id
+// ─── Intent Detectors ────────────────────────────────────────────────────────
+
+function isLoginCapability(cap: Capability): boolean {
+  const name = (cap.name + ' ' + cap.id).toLowerCase();
+  return /login|sign in|auth|authenticate|log in|signin/.test(name);
+}
+
+function isCreateCapability(cap: Capability): boolean {
+  const name = (cap.name + ' ' + cap.id).toLowerCase();
+  return /create|add|new|insert|post|publish/.test(name);
+}
+
+function isUpdateCapability(cap: Capability): boolean {
+  const name = (cap.name + ' ' + cap.id).toLowerCase();
+  return /update|edit|modify|patch|put|save/.test(name);
+}
+
+function isDeleteCapability(cap: Capability): boolean {
+  const name = (cap.name + ' ' + cap.id).toLowerCase();
+  return /delete|remove|destroy|trash|clear/.test(name);
+}
+
+function isSearchCapability(cap: Capability): boolean {
+  const name = (cap.name + ' ' + cap.id).toLowerCase();
+  return /search|find|query|lookup/.test(name);
+}
+
 function isWriteCapability(cap: Capability): boolean {
-  const name = (cap.name + ' ' + cap.id).toLowerCase();
-  return /create|add|update|edit|delete|remove|save|submit|send|post|put|patch/.test(name);
+  return isCreateCapability(cap) || isUpdateCapability(cap) || isDeleteCapability(cap) || isLoginCapability(cap);
 }
 
-// Detects read-only intent
-function isReadCapability(cap: Capability): boolean {
-  const name = (cap.name + ' ' + cap.id).toLowerCase();
-  return /search|find|get|list|read|fetch|view|show/.test(name);
-}
+// ─── Google Calendar Specific ────────────────────────────────────────────────
 
-/**
- * Build a URL-parameter based create URL for Google Calendar.
- * WHY: Google Calendar supports event creation via URL params — no form filling needed.
- * This is faster, more reliable, and doesn't depend on DOM structure.
- */
 function buildGoogleCalendarCreateUrl(params: Record<string, unknown>): string {
   const title = encodeURIComponent(String(params.title || params.name || ''));
   const desc = encodeURIComponent(String(params.description || ''));
 
-  // Convert ISO strings to Google Calendar date format (YYYYMMDDTHHmmss)
   const toGCalDate = (val: unknown): string => {
     if (!val) return '';
     const d = new Date(String(val));
@@ -60,9 +74,8 @@ function buildGoogleCalendarCreateUrl(params: Record<string, unknown>): string {
   return url;
 }
 
-/**
- * Build an ordered sequence of DOM actions for a given capability + params.
- */
+// ─── Main Builder ────────────────────────────────────────────────────────────
+
 export function buildActionSequence(
   capability: Capability,
   params: Record<string, unknown>,
@@ -73,13 +86,11 @@ export function buildActionSequence(
   const capId = capability.id.toLowerCase();
   const capName = capability.name.toLowerCase();
 
-  // ── Google Calendar: Create Event ─────────────────────────────────────────
-  // Use URL-parameter API — no fragile DOM form filling needed
-  if (baseUrl.includes('calendar.google.com') && /create/.test(capId + capName)) {
+  // 1. Google Calendar Fast Path
+  if (baseUrl.includes('calendar.google.com') && isCreateCapability(capability)) {
     const createUrl = buildGoogleCalendarCreateUrl(params);
     actions.push({ type: 'navigate', target: createUrl });
-    actions.push({ type: 'wait', ms: 2000 });
-    // Click "Save" — Google Calendar's save button has aria-label "Save"
+    actions.push({ type: 'waitForElement', target: 'Save', value: '10000' });
     actions.push({ type: 'click', target: 'Save' });
     actions.push({ type: 'wait', ms: 1500 });
     actions.push({ type: 'read', target: 'page' });
@@ -87,55 +98,84 @@ export function buildActionSequence(
     return { actions, confirmationHints, targetUrl: createUrl };
   }
 
-  // ── Navigate to the capability's source location ───────────────────────────
   const targetUrl = (capability.sourceLocation || baseUrl).trim().startsWith('http')
     ? (capability.sourceLocation || baseUrl).trim()
     : `${baseUrl}${capability.sourceLocation}`;
 
   actions.push({ type: 'navigate', target: targetUrl });
-  actions.push({ type: 'wait', ms: 1500 });
-
-  // ── Route by sourceType first, then fall back to intent detection ──────────
-  if (capability.sourceType === 'form' || capability.sourceType === 'api') {
-    // Fill each parameter into its corresponding form field
+  
+  // Helper to fill parameters safely
+  const pushParamFills = () => {
     for (const param of capability.parameters) {
       const value = params[param.name];
       if (value === undefined || value === null) continue;
+      
       const fieldTarget = param.description || param.name;
+      actions.push({ type: 'waitForElement', target: fieldTarget, value: '3000' });
+      
       if (param.type === 'boolean') {
-        actions.push({ type: 'click', target: fieldTarget });
+        actions.push({ type: 'checkBox', target: fieldTarget, value: String(value) });
+      } else if (param.type === 'enum' || fieldTarget.toLowerCase().includes('select') || fieldTarget.toLowerCase().includes('dropdown') || fieldTarget.toLowerCase().includes('country')) {
+        actions.push({ type: 'selectOption', target: fieldTarget, value: String(value) });
       } else {
         actions.push({ type: 'fill', target: fieldTarget, value: String(value) });
       }
     }
-    actions.push({ type: 'wait', ms: 300 });
-    actions.push({ type: 'submit', target: undefined });
-    confirmationHints.push('saved', 'created', 'added', 'success', 'done');
+  };
 
-  } else if (capability.sourceType === 'button') {
-    actions.push({ type: 'click', target: capability.name });
-    confirmationHints.push('deleted', 'removed', 'confirmed', 'success');
+  // 2. Intent-Based Routing
+  
+  if (isLoginCapability(capability)) {
+    pushParamFills();
+    actions.push({ type: 'click', target: 'Log in|Login|Sign in|Continue|Submit|Next' });
+    actions.push({ type: 'wait', ms: 2000 });
+    actions.push({ type: 'read', target: 'page' });
+    confirmationHints.push('logged in', 'dashboard', 'success', 'welcome');
 
-  } else if (isWriteCapability(capability)) {
-    // WHY: 'inferred' write capabilities were reading the page — this was the root cause bug.
-    // Now we detect write intent and try to fill any available form fields.
-    for (const param of capability.parameters) {
-      const value = params[param.name];
-      if (value === undefined || value === null) continue;
-      const fieldTarget = param.description || param.name;
-      actions.push({ type: 'fill', target: fieldTarget, value: String(value) });
+  } else if (isDeleteCapability(capability)) {
+    // Navigate, maybe search, click target, click delete, click confirm
+    // We assume the target element is passed in params.id or params.name
+    const targetName = params.id || params.name || params.target;
+    if (targetName) {
+      actions.push({ type: 'waitForElement', target: String(targetName), value: '5000' });
+      actions.push({ type: 'click', target: String(targetName) });
+      actions.push({ type: 'wait', ms: 500 });
     }
-    actions.push({ type: 'wait', ms: 300 });
-    // Try clicking a Save/Submit/Create button
-    const saveButtonHints = ['Save', 'Submit', 'Create', 'Add', 'Confirm', 'Done'];
-    const capAction = capability.name.split(' ')[0]; // e.g. "Create"
-    actions.push({ type: 'click', target: [capAction, ...saveButtonHints].join('|') });
+    actions.push({ type: 'click', target: 'Delete|Remove|Trash|Clear' });
+    actions.push({ type: 'wait', ms: 500 });
+    actions.push({ type: 'click', target: 'Confirm|Yes|OK|Delete' });
     actions.push({ type: 'wait', ms: 1000 });
     actions.push({ type: 'read', target: 'page' });
-    confirmationHints.push('saved', 'created', 'success', 'done');
+    confirmationHints.push('deleted', 'removed', 'success');
+
+  } else if (isCreateCapability(capability) || isUpdateCapability(capability) || capability.sourceType === 'form') {
+    pushParamFills();
+    actions.push({ type: 'wait', ms: 300 });
+    const capAction = capability.name.split(' ')[0]; // e.g. "Create"
+    actions.push({ type: 'click', target: [capAction, 'Save', 'Submit', 'Create', 'Add', 'Update', 'Done', 'Next'].join('|') });
+    actions.push({ type: 'wait', ms: 1500 });
+    actions.push({ type: 'read', target: 'page' });
+    confirmationHints.push('saved', 'created', 'updated', 'success');
+
+  } else if (isSearchCapability(capability)) {
+    pushParamFills();
+    // Sometimes search is triggered by Enter
+    actions.push({ type: 'pressKey', target: 'Enter' });
+    // Also try clicking search button just in case
+    actions.push({ type: 'click', target: 'Search|Find|Go' });
+    actions.push({ type: 'wait', ms: 1500 });
+    actions.push({ type: 'read', target: 'page' });
+    confirmationHints.push('results', 'found');
+
+  } else if (capability.sourceType === 'button') {
+    actions.push({ type: 'waitForElement', target: capability.name, value: '5000' });
+    actions.push({ type: 'click', target: capability.name });
+    actions.push({ type: 'wait', ms: 1000 });
+    actions.push({ type: 'read', target: 'page' });
 
   } else {
-    // Safe read-only: extract page content
+    // Safe read-only: wait for basic hydration, then read page
+    actions.push({ type: 'wait', ms: 1500 });
     actions.push({ type: 'read', target: 'page' });
   }
 
