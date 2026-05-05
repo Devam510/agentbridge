@@ -107,7 +107,7 @@ app.post('/api/bridge/generate-and-install', (req, res) => {
     res.status(500).json({ error: err.message || 'Error generating bridge.' });
   }
 });
-// ── Extension Execution Bridge (Phase 7) ──────────────────────────────────
+// ── Extension Execution Bridge (Phase 8D) ──────────────────────────────────
 // This connects the local MCP server (browser-executor.ts) to the Chrome Extension
 
 interface Task {
@@ -115,11 +115,13 @@ interface Task {
   capability: any;
   params: any;
   targetUrl: string;
+  actions: any;
   resolve: (value: any) => void;
   reject: (reason: any) => void;
+  createdAt: number;
 }
 
-const pendingTasks: Task[] = [];
+const pendingTasks = new Map<string, Task>();
 let currentPollRes: express.Response | null = null;
 
 // Called by browser-executor.ts to request execution in the real browser
@@ -131,14 +133,13 @@ app.post('/api/execute', async (req, res) => {
   let timeoutHandle: NodeJS.Timeout;
 
   const taskPromise = new Promise((resolve, reject) => {
-    const task: Task = { id: taskId, capability, params, targetUrl, resolve, reject };
-    pendingTasks.push(task);
+    const task: Task = { id: taskId, capability, params, targetUrl, actions, resolve, reject, createdAt: Date.now() };
+    pendingTasks.set(taskId, task);
 
-    // 45s timeout — covers slow SPAs like Google Calendar
+    // 45s timeout — covers slow SPAs
     timeoutHandle = setTimeout(() => {
-      const idx = pendingTasks.findIndex(t => t.id === taskId);
-      if (idx !== -1) {
-        pendingTasks.splice(idx, 1);
+      if (pendingTasks.has(taskId)) {
+        pendingTasks.delete(taskId);
         reject(new Error('AgentBridge timeout: The Chrome Extension did not respond within 45s. Make sure the extension is installed and your browser is open.'));
       }
     }, 45000);
@@ -146,10 +147,16 @@ app.post('/api/execute', async (req, res) => {
 
   // Wake up any waiting extension poll immediately
   if (currentPollRes) {
-    const task = pendingTasks.find(t => t.id === taskId);
+    const task = pendingTasks.get(taskId);
     if (task) {
       console.log(`[Companion] Dispatching task ${taskId} to waiting extension`);
-      currentPollRes.json({ ...task, actions });
+      currentPollRes.json({ 
+        id: task.id, 
+        capability: task.capability, 
+        params: task.params, 
+        targetUrl: task.targetUrl, 
+        actions: task.actions 
+      });
       currentPollRes = null;
     }
   }
@@ -168,10 +175,20 @@ app.post('/api/execute', async (req, res) => {
 
 // Called by the Chrome Extension to wait for new commands
 app.get('/api/extension/poll', (req, res) => {
-  if (pendingTasks.length > 0) {
-    const task = pendingTasks[0];
-    console.log(`[Companion] Sending queued task ${task.id} to extension`);
-    res.json(task);
+  lastExtensionPing = Date.now(); // Also serves as heartbeat
+
+  // Find oldest pending task
+  const taskToRun = Array.from(pendingTasks.values()).sort((a, b) => a.createdAt - b.createdAt)[0];
+  
+  if (taskToRun) {
+    console.log(`[Companion] Sending queued task ${taskToRun.id} to extension`);
+    res.json({
+      id: taskToRun.id, 
+      capability: taskToRun.capability, 
+      params: taskToRun.params, 
+      targetUrl: taskToRun.targetUrl, 
+      actions: taskToRun.actions
+    });
   } else {
     // Long-poll: hang until a task arrives
     currentPollRes = res;
@@ -183,11 +200,12 @@ app.get('/api/extension/poll', (req, res) => {
 
 // Called by the Chrome Extension to return the execution result
 app.post('/api/extension/result', (req, res) => {
+  lastExtensionPing = Date.now();
   const { id, result, error } = req.body;
-  const taskIndex = pendingTasks.findIndex(t => t.id === id);
-  if (taskIndex !== -1) {
-    const task = pendingTasks[taskIndex];
-    pendingTasks.splice(taskIndex, 1);
+  
+  if (pendingTasks.has(id)) {
+    const task = pendingTasks.get(id)!;
+    pendingTasks.delete(id);
     if (error) {
       task.reject(new Error(error));
     } else {
@@ -198,15 +216,22 @@ app.post('/api/extension/result', (req, res) => {
   res.json({ success: true });
 });
 
-// Health endpoint for extension status
-let lastExtensionPing = 0;
+let lastExtensionPing = Date.now();
+
+// Health endpoints
+app.post('/api/extension/heartbeat', (req, res) => {
+  lastExtensionPing = Date.now();
+  res.json({ success: true });
+});
+
 app.get('/api/health/extension', (req, res) => {
   lastExtensionPing = Date.now();
   res.json({ status: 'ok', connected: true, timestamp: lastExtensionPing });
 });
 
 app.get('/api/health/extension/status', (req, res) => {
-  const isConnected = Date.now() - lastExtensionPing < 10000; // connected if pinged within 10s
+  // If we haven't seen the extension in 15s, it disconnected
+  const isConnected = Date.now() - lastExtensionPing < 15000; 
   res.json({ connected: isConnected, lastSeen: lastExtensionPing });
 });
 

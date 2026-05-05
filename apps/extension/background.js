@@ -12,12 +12,26 @@
 const API_BASE = 'http://localhost:3001';
 
 // ─── Keep-Alive ───────────────────────────────────────────────────────────────
-chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
+// periodInMinutes: 0.33 is ~20 seconds
+chrome.alarms.create('keepAlive', { periodInMinutes: 0.33 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'keepAlive') {
     pingHealth();
     if (!self.isPolling) pollCompanionApp();
   }
+});
+
+// ─── Lifecycle Events (Phase 8D) ──────────────────────────────────────────────
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[AgentBridge] Extension installed/updated. Starting loops.');
+  pingHealth();
+  if (!self.isPolling) pollCompanionApp();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[AgentBridge] Browser started. Starting loops.');
+  pingHealth();
+  if (!self.isPolling) pollCompanionApp();
 });
 
 // ─── Messages from popup.html ─────────────────────────────────────────────────
@@ -52,13 +66,22 @@ async function handleBridgeSite(url) {
   return { success: true, bridgeName, endpoint };
 }
 
-// ─── Health Ping ──────────────────────────────────────────────────────────────
+// ─── Health Ping & Heartbeat ──────────────────────────────────────────────────
 async function pingHealth() {
   try {
     const res = await fetch(`${API_BASE}/api/health/extension`);
     self.companionConnected = res.ok;
   } catch { self.companionConnected = false; }
 }
+
+async function sendHeartbeat() {
+  try {
+    await fetch(`${API_BASE}/api/extension/heartbeat`, { method: 'POST' });
+  } catch { /* ignore heartbeat errors */ }
+}
+
+// Send heartbeat every 5 seconds while SW is awake
+setInterval(sendHeartbeat, 5000);
 
 // ─── Get or create a tab for a URL (tab hijacking) ───────────────────────────
 async function getOrCreateTab(targetUrl) {

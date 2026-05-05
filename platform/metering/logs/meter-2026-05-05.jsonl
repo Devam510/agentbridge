@@ -11,3 +11,4 @@
 {"eventId":"evt_1778004757696_pv6w0ri","timestamp":"2026-05-05T18:12:37.696Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":11507,"success":true}
 {"eventId":"evt_1778005178808_9hvkbmn","timestamp":"2026-05-05T18:19:38.807Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":3824,"success":true}
 {"eventId":"evt_1778005237234_rvzzfib","timestamp":"2026-05-05T18:20:37.234Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":7918,"success":true}
+{"eventId":"evt_1778005536859_ds5kmhl","timestamp":"2026-05-05T18:25:36.859Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":8520,"success":true}
