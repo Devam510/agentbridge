@@ -1,16 +1,13 @@
 /**
  * browser-executor.ts
  * Executes agent commands against real software via browser automation.
- * WHY: When no native API exists, we fall back to deterministic browser execution.
- * Uses mapped selectors from our capability map — NOT fragile vision models.
+ * WHY: Phase 7 — routes to Chrome Extension via Companion App instead of local Playwright.
+ * This allows execution in the user's real authenticated browser session.
  */
 
-import { Page } from 'playwright';
-import { launchBrowser, BrowserSession } from '../crawler/browser-launcher.js';
-import { fillForm } from './form-filler.js';
-import { extractResult, ExtractionResult } from './result-extractor.js';
 import { executeHybrid } from './hybrid-router.js';
 import { Capability, CapabilityMap } from '../inferrer/capability-map.js';
+import { buildActionSequence } from './sequence-builder.js';
 
 export interface ExecuteOptions {
   capabilityId: string;
@@ -133,82 +130,54 @@ export class BridgeExecutor {
     return null;
   }
 
-  /**
-   * Execute a capability via browser automation.
-   * Navigates to the source page and interacts with the mapped form/button.
-   */
   private async executeBrowser(
     capability: Capability,
     params: Record<string, unknown>,
   ): Promise<{ success: boolean; data: Record<string, unknown>; errorMessage?: string }> {
-    // Get or create a browser session
-    if (!this.session) {
-      this.session = await launchBrowser({ headless: true, timeout: 30000 });
-    }
-
-    const page: Page = this.session.page;
-
     try {
-      // Navigate to the capability's source location
-      const targetPage = capability.sourceLocation.startsWith('http')
-        ? capability.sourceLocation
-        : `${this.targetUrl}${capability.sourceLocation}`;
+      // Phase 7: Build a structured action sequence and send it to the Chrome Extension
+      // via the Companion App. The extension executes this on the user's real browser.
+      const sequence = buildActionSequence(capability, params, this.targetUrl);
 
-      await page.goto(targetPage, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await page.waitForTimeout(500);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 50000); // 50s timeout
 
-      let result: ExtractionResult;
+      const response = await fetch('http://localhost:3001/api/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          capability,
+          params,
+          targetUrl: this.targetUrl,
+          actions: sequence.actions,
+          confirmationHints: sequence.confirmationHints,
+        }),
+        signal: controller.signal,
+      });
 
-      if (capability.sourceType === 'form') {
-        // Build a synthetic form definition from the capability
-        const syntheticForm = {
-          id: capability.id,
-          action: targetPage,
-          method: 'POST' as const,
-          purpose: 'create' as const,
-          fields: capability.parameters.map((p) => ({
-            name: p.name,
-            label: p.description,
-            type: p.type === 'number' ? 'number' : p.type === 'boolean' ? 'checkbox' : 'text',
-            placeholder: '',
-            required: p.required,
-            options: p.enum,
-          })),
-          submitButtonText: 'Submit',
-        };
+      clearTimeout(timeout);
 
-        const fillResult = await fillForm(page, {
-          form: syntheticForm,
-          data: params as Record<string, string | number | boolean>,
-          submit: true,
-        });
-
-        result = await extractResult(page);
-
-        if (!fillResult.success) {
-          return { success: false, data: {}, errorMessage: fillResult.errorMessage };
-        }
-      } else if (capability.sourceType === 'button') {
-        // Click the action button
-        const buttonSelector = `button:has-text("${capability.name.slice(0, 30)}")`;
-        await page.locator(buttonSelector).first().click({ timeout: 5000 });
-        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined);
-        result = await extractResult(page);
-      } else {
-        // 'api' or 'inferred' — navigate and extract
-        result = await extractResult(page);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.errorMessage || `Extension bridge returned ${response.status}`);
       }
 
-      return { success: result.success, data: result.data };
+      const result = await response.json();
+      return result;
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return {
+          success: false,
+          data: {},
+          errorMessage: 'The AgentBridge Chrome Extension did not respond in time. Make sure the extension is installed, your browser is open, and you are logged into the website.',
+        };
+      }
       return {
         success: false,
         data: {},
         errorMessage: err instanceof Error ? err.message : String(err),
       };
     }
-    // Note: session stays open for reuse across multiple executions
-    // Call cleanup() when done with the executor
   }
 
   /**
@@ -216,9 +185,6 @@ export class BridgeExecutor {
    * Call this when the executor is no longer needed.
    */
   async cleanup(): Promise<void> {
-    if (this.session) {
-      await this.session.close();
-      this.session = null;
-    }
+    // No local browser resources — extension handles cleanup
   }
 }

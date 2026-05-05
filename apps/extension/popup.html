@@ -8,6 +8,13 @@
   body { width: 320px; font-family: -apple-system, system-ui, sans-serif; background: #080B14; color: #F8FAFC; margin: 0; }
   .header { display: flex; align-items: center; gap: 0.5rem; padding: 1rem; border-bottom: 1px solid rgba(255,255,255,0.07); }
   .logo { font-size: 1rem; font-weight: 800; background: linear-gradient(135deg,#6366F1,#06B6D4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .connection-badge { margin-left: auto; display: flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 99px; }
+  .connection-badge.connected { background: rgba(16,185,129,0.15); color: #10B981; }
+  .connection-badge.disconnected { background: rgba(239,68,68,0.15); color: #EF4444; }
+  .connection-badge.executing { background: rgba(99,102,241,0.15); color: #818CF8; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .dot.pulse { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
   .url-bar { margin: 1rem; background: #0F1525; border: 1px solid rgba(255,255,255,0.07); border-radius: 8px; padding: 0.6rem 0.75rem; font-size: 0.8rem; color: #94A3B8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .btn { display: block; width: calc(100% - 2rem); margin: 0 1rem; padding: 0.75rem; border-radius: 10px; font-size: 0.875rem; font-weight: 700; cursor: pointer; border: none; transition: all 0.2s; }
   .btn-primary { background: #6366F1; color: white; margin-bottom: 0.5rem; }
@@ -24,6 +31,10 @@
 <div class="header">
   <span>⚡</span>
   <span class="logo">AgentBridge</span>
+  <div class="connection-badge disconnected" id="conn-badge">
+    <div class="dot" id="conn-dot"></div>
+    <span id="conn-label">Offline</span>
+  </div>
 </div>
 <div class="url-bar" id="current-url">Loading…</div>
 <div class="progress"><div class="progress-bar" id="pbar"></div></div>
@@ -36,8 +47,34 @@
   const pbar = document.getElementById('pbar');
   const urlEl = document.getElementById('current-url');
   const bridgeBtn = document.getElementById('bridge-btn');
+  const connBadge = document.getElementById('conn-badge');
+  const connDot = document.getElementById('conn-dot');
+  const connLabel = document.getElementById('conn-label');
 
-  // 1. Health check local companion
+  // Live connection status polling
+  function updateBadge(status) {
+    connBadge.className = 'connection-badge ' + status;
+    connDot.className = 'dot' + (status === 'executing' ? ' pulse' : '');
+    connLabel.textContent = status === 'connected' ? '🟢 Connected' : status === 'executing' ? '⚙️ Executing' : '🔴 Offline';
+  }
+
+  async function refreshStatus() {
+    try {
+      const res = await fetch('http://localhost:3001/api/health/extension/status');
+      if (res.ok) {
+        const data = await res.json();
+        // Also ask background for current agent state
+        chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (bg) => {
+          if (bg?.status === 'executing') { updateBadge('executing'); }
+          else if (data.connected) { updateBadge('connected'); }
+          else { updateBadge('disconnected'); }
+        });
+      } else { updateBadge('disconnected'); }
+    } catch { updateBadge('disconnected'); }
+  }
+  setInterval(refreshStatus, 3000);
+  refreshStatus();
+
   async function checkCompanion() {
     try {
       const res = await fetch('http://localhost:3001/health');
