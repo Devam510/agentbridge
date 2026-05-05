@@ -70,11 +70,11 @@ function generateToolCode(cap: Capability, index: number, bridgeId: string): str
       let success = false;
       let executionPath: 'api' | 'browser' | 'error' = 'error';
       try {
-        const result = await executor.execute({
+        const result = await withTimeout(() => executor.execute({
           capabilityId: '${cap.id}',
           params: params as Record<string, unknown>,
           riskLevel: '${cap.riskLevel}',
-        });
+        }));
         success = true;
         executionPath = (result as any).executionPath ?? 'browser';
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
@@ -118,12 +118,27 @@ const server = new McpServer({
 });
 
 const executor = new BridgeExecutor({
-  targetUrl: '${capMap.targetUrl}',
+  targetUrl: '${capMap.targetUrl.trim()}',
   capabilityMap: ${JSON.stringify(capMap, null, 2)
     .split('\n')
     .map((line, i) => (i === 0 ? line : '  ' + line))
     .join('\n')},
 });
+
+/**
+ * WHY: Claude Desktop stdio transport has a ~60s hard timeout.
+ * Wrapping executor calls ensures we always respond within 40s.
+ */
+async function withTimeout<T>(fn: () => Promise<T>, ms = 40000): Promise<T> {
+  return Promise.race([
+    fn(),
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(
+        \`AgentBridge timed out after \${ms / 1000}s. Make sure the Companion server and Chrome Extension are running.\`
+      )), ms)
+    )
+  ]);
+}
 
 // ============================================================
 // TOOLS (${capMap.capabilities.length} capabilities)
