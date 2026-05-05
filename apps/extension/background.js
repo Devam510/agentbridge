@@ -131,85 +131,10 @@ async function runDomActionsOnTab(tabId, domActions) {
     target: { tabId },
     func: async (actionsJson) => {
       const actions = JSON.parse(actionsJson);
-
-      function findEl(target, preferRole) {
-        if (!target) return null;
-        const targets = String(target).split('|').map(t => t.trim());
-        for (const tgt of targets) {
-          const tgtLow = tgt.toLowerCase();
-          // 1. aria-label exact / partial
-          let el = document.querySelector(`[aria-label="${tgt}"]`)
-                || document.querySelector(`[aria-label*="${tgt}"]`);
-          if (el) return el;
-          // 2. Buttons/roles with matching text
-          const candidates = [...document.querySelectorAll(
-            'button, [role="button"], [jsname], input[type="submit"], input[type="button"]'
-          )];
-          el = candidates.find(b => b.textContent.trim().toLowerCase() === tgtLow)
-            || candidates.find(b => b.textContent.trim().toLowerCase().includes(tgtLow));
-          if (el) return el;
-          // 3. Label → input
-          const labels = [...document.querySelectorAll('label')];
-          const label = labels.find(l => l.textContent.trim().toLowerCase().includes(tgtLow));
-          if (label) {
-            if (label.htmlFor) { el = document.getElementById(label.htmlFor); if (el) return el; }
-            el = label.querySelector('input, textarea, select'); if (el) return el;
-          }
-          // 4. Input placeholder / name
-          el = document.querySelector(`input[placeholder*="${tgt}"]`)
-            || document.querySelector(`textarea[placeholder*="${tgt}"]`)
-            || document.querySelector(`input[name="${tgt}"]`);
-          if (el) return el;
-          // 5. CSS selector fallback
-          try { el = document.querySelector(tgt); } catch {}
-          if (el) return el;
-        }
-        return null;
+      if (window.AgentBridgeExecutor) {
+        return await window.AgentBridgeExecutor.executeSequence(actions);
       }
-
-      let lastResult = { title: document.title, url: window.location.href };
-
-      for (const action of actions) {
-        if (action.type === 'wait') {
-          await new Promise(r => setTimeout(r, action.ms || 500));
-
-        } else if (action.type === 'click') {
-          const el = findEl(action.target, 'button');
-          if (el) {
-            el.click();
-            await new Promise(r => setTimeout(r, 800));
-            lastResult = { clicked: action.target, title: document.title, url: window.location.href };
-          } else {
-            lastResult = { clickFailed: action.target, title: document.title, url: window.location.href };
-          }
-
-        } else if (action.type === 'fill') {
-          const el = findEl(action.target, 'input');
-          if (el) {
-            el.focus();
-            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-            if (nativeSetter) nativeSetter.call(el, action.value);
-            else el.value = action.value;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            await new Promise(r => setTimeout(r, 200));
-            lastResult = { filled: action.target };
-          }
-
-        } else if (action.type === 'submit') {
-          const form = document.querySelector('form');
-          if (form) { form.submit(); await new Promise(r => setTimeout(r, 800)); }
-
-        } else if (action.type === 'read') {
-          lastResult = {
-            title: document.title,
-            url: window.location.href,
-            content: document.body.innerText.substring(0, 3000),
-          };
-        }
-      }
-
-      return lastResult;
+      return { error: 'AgentBridgeExecutor not found in page context' };
     },
     args: [JSON.stringify(domActions)],
   });

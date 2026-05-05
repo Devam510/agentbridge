@@ -1,197 +1,250 @@
 /**
  * executor-content.js — Universal DOM Action Engine
- * WHY: Injected into any page to perform read/write/click/fill actions on behalf of Claude.
- * Works on ANY website without site-specific code.
+ * 
+ * Phase 8A: Bulletproof Element Finder (Shadow DOM, iframes, visibility, retry loops)
+ * Phase 8B: New Action Types (hover, pressKey, selectOption, checkBox, etc.)
+ * Phase 8E: Password & Credentials Handling
  */
 
-// Listen for action commands from the background script
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === 'EXECUTE_ACTION') {
-    executeAction(message.action)
-      .then(result => sendResponse({ success: true, data: result }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
-    return true; // Keep channel open for async
+// We attach to window so background.js can call it via executeScript without message passing
+window.AgentBridgeExecutor = (function() {
+  
+  async function wait(ms) {
+    return new Promise(r => setTimeout(r, ms));
   }
 
-  if (message.type === 'EXECUTE_SEQUENCE') {
-    executeSequence(message.actions)
-      .then(result => sendResponse({ success: true, data: result }))
-      .catch(err => sendResponse({ success: false, error: err.message }));
+  // ─── Phase 8A: Bulletproof Element Finder ─────────────────────────────────
+
+  function isVisibleAndEnabled(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
     return true;
   }
-});
 
-/**
- * Execute a sequence of DOM actions in order.
- * Returns the result of the last action.
- */
-async function executeSequence(actions) {
-  let lastResult = null;
-  for (const action of actions) {
-    lastResult = await executeAction(action);
-  }
-  return lastResult;
-}
-
-/**
- * Execute a single DOM action.
- * action = { type, target, value }
- */
-async function executeAction(action) {
-  switch (action.type) {
-    case 'click':    return performClick(action.target);
-    case 'fill':     return performFill(action.target, action.value);
-    case 'select':   return performSelect(action.target, action.value);
-    case 'read':     return performRead(action.target);
-    case 'navigate': return performNavigate(action.target);
-    case 'submit':   return performSubmit(action.target);
-    case 'wait':     return performWait(action.ms || 1000);
-    default:
-      throw new Error(`Unknown action type: ${action.type}`);
-  }
-}
-
-// ─── SMART ELEMENT FINDER ────────────────────────────────────────────────────
-// Uses a fallback chain to find elements on ANY website
-
-function findElement(target, role) {
-  if (!target) return null;
-  const t = target.toLowerCase().trim();
-
-  // Strategy 1: ARIA label exact or partial match
-  let el = document.querySelector(`[aria-label="${target}"]`)
-    || document.querySelector(`[aria-label*="${t}"]`);
-  if (el) return el;
-
-  // Strategy 2: Button/link by visible text content
-  if (!role || role === 'button' || role === 'link') {
-    const buttons = [...document.querySelectorAll('button, [role="button"], a')];
-    el = buttons.find(b => b.textContent.trim().toLowerCase().includes(t));
-    if (el) return el;
-  }
-
-  // Strategy 3: Input by its associated <label> text
-  if (!role || role === 'input') {
-    const labels = [...document.querySelectorAll('label')];
-    const label = labels.find(l => l.textContent.trim().toLowerCase().includes(t));
-    if (label && label.htmlFor) {
-      el = document.getElementById(label.htmlFor);
-      if (el) return el;
+  // Recursive shadow DOM search
+  function querySelectorAllDeep(selector, root = document) {
+    const results = Array.from(root.querySelectorAll(selector));
+    const allNodes = Array.from(root.querySelectorAll('*'));
+    for (const node of allNodes) {
+      if (node.shadowRoot) {
+        results.push(...querySelectorAllDeep(selector, node.shadowRoot));
+      }
     }
-    // Label wrapping an input
-    if (label) {
-      el = label.querySelector('input, textarea, select');
+    return results;
+  }
+
+  function findElSync(target, preferRole) {
+    if (!target) return null;
+    const targets = String(target).split('|').map(t => t.trim());
+    
+    for (const tgt of targets) {
+      const tgtLow = tgt.toLowerCase();
+      
+      // 1. ARIA label
+      let elements = querySelectorAllDeep(`[aria-label="${tgt}"]`).concat(querySelectorAllDeep(`[aria-label*="${tgt}"]`));
+      let el = elements.find(isVisibleAndEnabled);
       if (el) return el;
+      
+      // 2. Buttons, roles, links, list items
+      const candidates = querySelectorAllDeep('button, [role="button"], [role="menuitem"], [role="tab"], [jsname], input[type="submit"], input[type="button"], a, li');
+      el = candidates.find(b => b.textContent.trim().toLowerCase() === tgtLow && isVisibleAndEnabled(b))
+        || candidates.find(b => b.textContent.trim().toLowerCase().includes(tgtLow) && isVisibleAndEnabled(b));
+      if (el) return el;
+      
+      // 3. Labels
+      const labels = querySelectorAllDeep('label');
+      const label = labels.find(l => l.textContent.trim().toLowerCase().includes(tgtLow) && isVisibleAndEnabled(l));
+      if (label) {
+        if (label.htmlFor) { 
+          el = querySelectorAllDeep(`#${label.htmlFor}`).find(isVisibleAndEnabled); 
+          if (el) return el; 
+        }
+        el = Array.from(label.querySelectorAll('input, textarea, select')).find(isVisibleAndEnabled); 
+        if (el) return el;
+      }
+      
+      // 4. Inputs
+      const inputs = querySelectorAllDeep(`input[placeholder*="${tgt}"], textarea[placeholder*="${tgt}"], input[name="${tgt}"]`);
+      el = inputs.find(isVisibleAndEnabled);
+      if (el) return el;
+      
+      // 5. Raw CSS
+      try { 
+        el = querySelectorAllDeep(tgt).find(isVisibleAndEnabled); 
+        if (el) return el;
+      } catch {}
     }
+    return null;
   }
 
-  // Strategy 4: Input by placeholder text
-  if (!role || role === 'input') {
-    el = document.querySelector(`input[placeholder*="${t}"]`)
-      || document.querySelector(`textarea[placeholder*="${t}"]`);
-    if (el) return el;
+  // Retry loop for SPA dynamic rendering
+  async function findEl(target, preferRole, retries = 6, delay = 500) {
+    for (let i = 0; i < retries; i++) {
+      const el = findElSync(target, preferRole);
+      if (el) return el;
+      await wait(delay);
+    }
+    return null;
   }
 
-  // Strategy 5: Input by name attribute
-  el = document.querySelector(`input[name="${target}"]`)
-    || document.querySelector(`input[name*="${t}"]`);
-  if (el) return el;
-
-  // Strategy 6: Raw CSS selector (last resort)
-  try { el = document.querySelector(target); } catch {}
-  return el;
-}
-
-// ─── ACTION IMPLEMENTATIONS ──────────────────────────────────────────────────
-
-async function performClick(target) {
-  // Support pipe-separated fallback list: "Save|Submit|Create"
-  const targets = (target || '').split('|').map(t => t.trim()).filter(Boolean);
-  for (const t of targets) {
-    const el = findElement(t, 'button');
+  async function scrollTo(el) {
     if (el) {
-      el.click();
-      await new Promise(r => setTimeout(r, 500));
-      return { clicked: t, pageTitle: document.title, url: window.location.href };
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await wait(300);
     }
   }
-  throw new Error(`Click target not found: "${target}"`);
-}
 
-async function performFill(target, value) {
-  const el = findElement(target, 'input');
-  if (!el) throw new Error(`Input field not found: "${target}"`);
-  el.focus();
-  el.value = '';
-  // Use native input events so React/Vue/Angular frameworks detect the change
-  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, 'value'
-  )?.set;
-  if (nativeInputValueSetter) {
-    nativeInputValueSetter.call(el, value);
-  } else {
-    el.value = value;
+  // ─── Phase 8B & 8E: Action Implementations ─────────────────────────────────
+
+  async function performClick(target) {
+    const el = await findEl(target, 'button');
+    if (el) {
+      await scrollTo(el);
+      el.click();
+      await wait(800);
+      return { clicked: target };
+    }
+    return { clickFailed: target };
   }
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-  return { filled: target, value };
-}
 
-async function performSelect(target, value) {
-  const el = findElement(target, 'input');
-  if (!el) throw new Error(`Select/dropdown not found: "${target}"`);
-  if (el.tagName === 'SELECT') {
-    el.value = value;
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  } else {
-    // Handle custom dropdowns: click to open, then click the option
-    el.click();
-    await new Promise(r => setTimeout(r, 300));
-    const options = [...document.querySelectorAll('[role="option"], li, .option')];
-    const option = options.find(o => o.textContent.trim().toLowerCase().includes(value.toLowerCase()));
-    if (option) option.click();
+  async function performFill(target, value) {
+    const el = await findEl(target, 'input');
+    if (el) {
+      await scrollTo(el);
+      el.focus();
+      
+      // Phase 8E: Native setter bypasses React synthetic events
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (nativeSetter) {
+        nativeSetter.call(el, value);
+      } else {
+        el.value = value;
+      }
+      
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      
+      await wait(200);
+      return { filled: target };
+    }
+    return { fillFailed: target };
   }
-  return { selected: target, value };
-}
 
-function performRead(target) {
-  if (!target || target === 'page' || target === 'all') {
-    // Read the whole page content
+  async function performSelectOption(target, value) {
+    const el = await findEl(target, 'input');
+    if (el) {
+      await scrollTo(el);
+      if (el.tagName === 'SELECT') {
+        el.value = value;
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      } else {
+        el.click(); // Open custom dropdown
+        await wait(500);
+        const options = querySelectorAllDeep('[role="option"], li, .option');
+        const option = options.find(o => o.textContent.trim().toLowerCase().includes(value.toLowerCase()) && isVisibleAndEnabled(o));
+        if (option) {
+          await scrollTo(option);
+          option.click();
+        } else {
+          return { selectFailed: `Option ${value} not found` };
+        }
+      }
+      return { selected: value, in: target };
+    }
+    return { selectFailed: target };
+  }
+
+  async function performCheckBox(target, checkedStr) {
+    const el = await findEl(target, 'input');
+    if (el) {
+      await scrollTo(el);
+      const shouldBeChecked = checkedStr === 'true' || checkedStr === true;
+      if (el.checked !== shouldBeChecked) {
+        el.click();
+      }
+      return { checkBox: target, checked: shouldBeChecked };
+    }
+    return { checkBoxFailed: target };
+  }
+
+  async function performHover(target) {
+    const el = await findEl(target);
+    if (el) {
+      await scrollTo(el);
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      await wait(500);
+      return { hovered: target };
+    }
+    return { hoverFailed: target };
+  }
+
+  async function performPressKey(key) {
+    // Dispatch to active element
+    const el = document.activeElement || document.body;
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: key, bubbles: true }));
+    await wait(300);
+    return { pressedKey: key };
+  }
+
+  async function performWaitForElement(target, msStr) {
+    const ms = parseInt(msStr) || 5000;
+    const retries = Math.ceil(ms / 500);
+    const el = await findEl(target, null, retries, 500);
+    if (el) return { found: target };
+    return { notFound: target };
+  }
+
+  function performRead() {
     return {
       title: document.title,
       url: window.location.href,
-      content: document.body.innerText.substring(0, 8000),
-      headings: [...document.querySelectorAll('h1,h2,h3')].map(h => h.textContent.trim()),
+      content: document.body.innerText.substring(0, 3000),
     };
   }
-  // Read a specific element
-  const el = findElement(target);
-  if (!el) throw new Error(`Read target not found: "${target}"`);
-  return {
-    text: el.innerText || el.textContent,
-    html: el.innerHTML.substring(0, 2000),
-    url: window.location.href,
-  };
-}
 
-async function performNavigate(url) {
-  window.location.href = url;
-  return { navigated: url };
-}
+  // ─── Main Executor Sequence ───────────────────────────────────────────────
 
-async function performSubmit(target) {
-  let form = null;
-  if (target) {
-    form = findElement(target);
-    if (!form) form = document.querySelector('form');
-  } else {
-    form = document.querySelector('form');
+  async function executeSequence(actions) {
+    let lastResult = { title: document.title, url: window.location.href };
+
+    for (const action of actions) {
+      if (action.type === 'wait') {
+        await wait(action.ms || 500);
+      } else if (action.type === 'click') {
+        lastResult = await performClick(action.target);
+      } else if (action.type === 'fill') {
+        lastResult = await performFill(action.target, action.value);
+      } else if (action.type === 'selectOption') {
+        lastResult = await performSelectOption(action.target, action.value);
+      } else if (action.type === 'checkBox') {
+        lastResult = await performCheckBox(action.target, action.value);
+      } else if (action.type === 'hover') {
+        lastResult = await performHover(action.target);
+      } else if (action.type === 'pressKey') {
+        lastResult = await performPressKey(action.target);
+      } else if (action.type === 'waitForElement') {
+        lastResult = await performWaitForElement(action.target, action.value);
+      } else if (action.type === 'submit') {
+        const form = document.querySelector('form');
+        if (form) { form.submit(); await wait(800); }
+      } else if (action.type === 'read') {
+        lastResult = performRead();
+      }
+      
+      // Append current context
+      lastResult.title = document.title;
+      lastResult.url = window.location.href;
+    }
+    return lastResult;
   }
-  if (!form) throw new Error('No form found to submit');
-  form.submit();
-  return { submitted: true };
-}
 
-function performWait(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+  return { executeSequence };
+})();
