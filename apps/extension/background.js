@@ -1,8 +1,12 @@
 /**
  * background.js — AgentBridge Extension Service Worker (MV3)
- * Root-cause fix: Chrome closes message channels for long-running content script operations.
- * Solution: Use chrome.scripting.executeScript (returns a Promise) instead of 
- * chrome.tabs.sendMessage for sequences that take longer than ~5 seconds.
+ *
+ * KEY ARCHITECTURE FIX:
+ *   Navigation (chrome.tabs.update) and DOM actions (executeScript) MUST be separate.
+ *   WHY: `window.location.href = url` inside executeScript destroys the script context,
+ *   so any actions after a navigate action never execute.
+ *   Solution: process actions in the background script sequentially —
+ *   navigate/wait in background.js, DOM actions via executeScript.
  */
 
 const API_BASE = 'http://localhost:3001';
@@ -19,14 +23,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ─── Messages from popup.html ─────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'BRIDGE_SITE') {
-    handleBridgeSite(message.url).then(sendResponse).catch(err => {
-      sendResponse({ success: false, error: err.message });
-    });
+    handleBridgeSite(message.url).then(sendResponse).catch(err =>
+      sendResponse({ success: false, error: err.message })
+    );
     return true;
   }
   if (message.type === 'GET_STATUS') {
     sendResponse({ status: self.agentStatus || 'idle', connected: self.companionConnected || false });
-    return false;
   }
 });
 
@@ -54,12 +57,10 @@ async function pingHealth() {
   try {
     const res = await fetch(`${API_BASE}/api/health/extension`);
     self.companionConnected = res.ok;
-  } catch {
-    self.companionConnected = false;
-  }
+  } catch { self.companionConnected = false; }
 }
 
-// ─── Tab Hijacking: Get or create a tab for a given URL ──────────────────────
+// ─── Get or create a tab for a URL (tab hijacking) ───────────────────────────
 async function getOrCreateTab(targetUrl) {
   const hostname = new URL(targetUrl.trim()).hostname;
   const existing = await chrome.tabs.query({ url: `*://${hostname}/*` });
@@ -71,110 +72,92 @@ async function getOrCreateTab(targetUrl) {
   return tab.id;
 }
 
-// ─── Wait for tab to finish loading ──────────────────────────────────────────
-function waitForTabLoad(tabId) {
+// ─── Wait for a tab to finish loading ────────────────────────────────────────
+function waitForTabLoad(tabId, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Tab load timeout after 20s')), 20000);
+    const timer = setTimeout(() => reject(new Error('Tab load timeout')), timeoutMs);
     function listener(id, changeInfo) {
       if (id === tabId && changeInfo.status === 'complete') {
-        clearTimeout(timeout);
+        clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
     }
-    // Check if already loaded
     chrome.tabs.get(tabId, (tab) => {
-      if (tab.status === 'complete') {
-        clearTimeout(timeout);
-        resolve();
-      } else {
-        chrome.tabs.onUpdated.addListener(listener);
-      }
+      if (tab && tab.status === 'complete') { clearTimeout(timer); resolve(); }
+      else chrome.tabs.onUpdated.addListener(listener);
     });
   });
 }
 
-// ─── Execute actions via chrome.scripting.executeScript ──────────────────────
-// WHY: We use executeScript instead of sendMessage because Chrome's message channel
-// closes after ~5s for async responses. executeScript returns a Promise that
-// waits for the full execution — no channel timeout issue.
-async function executeActionsOnTab(tabId, actions) {
-  // First ensure the content script is injected
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['executor-content.js'],
-    });
-  } catch (_) {
-    // Already injected — ignore error
+// ─── Run DOM-only actions on a tab via executeScript ─────────────────────────
+// WHY: executeScript returns a Promise — no message channel, no timeout issue.
+// IMPORTANT: Only pass non-navigate, non-wait actions here.
+async function runDomActionsOnTab(tabId, domActions) {
+  if (!domActions || domActions.length === 0) {
+    // Default: read the page
+    domActions = [{ type: 'read', target: 'page' }];
   }
 
-  // Execute actions via injected function (not messaging)
+  // Inject content script first (idempotent)
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['executor-content.js'] });
+  } catch (_) { /* already injected */ }
+
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     func: async (actionsJson) => {
       const actions = JSON.parse(actionsJson);
 
-      // Inline action executor (mirrors executor-content.js logic)
-      // WHY: We inline it here because chrome.scripting.executeScript
-      // can't call functions defined in content scripts.
-
-      async function wait(ms) {
-        return new Promise(r => setTimeout(r, ms));
-      }
-
-      function findEl(target, role) {
+      function findEl(target, preferRole) {
         if (!target) return null;
-        const t = String(target).toLowerCase().trim();
-
-        // Try pipe-separated fallbacks
-        const targets = t.split('|').map(x => x.trim());
+        const targets = String(target).split('|').map(t => t.trim());
         for (const tgt of targets) {
+          const tgtLow = tgt.toLowerCase();
+          // 1. aria-label exact / partial
           let el = document.querySelector(`[aria-label="${tgt}"]`)
-            || document.querySelector(`[aria-label*="${tgt}"]`);
+                || document.querySelector(`[aria-label*="${tgt}"]`);
           if (el) return el;
-
-          if (!role || role === 'button') {
-            const btns = [...document.querySelectorAll('button, [role="button"], [jsname]')];
-            el = btns.find(b => b.textContent.trim().toLowerCase().includes(tgt));
-            if (el) return el;
-          }
-
+          // 2. Buttons/roles with matching text
+          const candidates = [...document.querySelectorAll(
+            'button, [role="button"], [jsname], input[type="submit"], input[type="button"]'
+          )];
+          el = candidates.find(b => b.textContent.trim().toLowerCase() === tgtLow)
+            || candidates.find(b => b.textContent.trim().toLowerCase().includes(tgtLow));
+          if (el) return el;
+          // 3. Label → input
           const labels = [...document.querySelectorAll('label')];
-          const label = labels.find(l => l.textContent.trim().toLowerCase().includes(tgt));
+          const label = labels.find(l => l.textContent.trim().toLowerCase().includes(tgtLow));
           if (label) {
             if (label.htmlFor) { el = document.getElementById(label.htmlFor); if (el) return el; }
             el = label.querySelector('input, textarea, select'); if (el) return el;
           }
-
+          // 4. Input placeholder / name
           el = document.querySelector(`input[placeholder*="${tgt}"]`)
             || document.querySelector(`textarea[placeholder*="${tgt}"]`)
             || document.querySelector(`input[name="${tgt}"]`);
           if (el) return el;
-
+          // 5. CSS selector fallback
           try { el = document.querySelector(tgt); } catch {}
           if (el) return el;
         }
         return null;
       }
 
-      let lastResult = null;
+      let lastResult = { title: document.title, url: window.location.href };
+
       for (const action of actions) {
         if (action.type === 'wait') {
-          await wait(action.ms || 1000);
-
-        } else if (action.type === 'navigate') {
-          window.location.href = action.target;
-          await wait(3000); // Give page time to start loading
+          await new Promise(r => setTimeout(r, action.ms || 500));
 
         } else if (action.type === 'click') {
           const el = findEl(action.target, 'button');
           if (el) {
             el.click();
-            await wait(500);
-            lastResult = { clicked: action.target, url: window.location.href };
+            await new Promise(r => setTimeout(r, 800));
+            lastResult = { clicked: action.target, title: document.title, url: window.location.href };
           } else {
-            lastResult = { clickFailed: action.target, url: window.location.href };
+            lastResult = { clickFailed: action.target, title: document.title, url: window.location.href };
           }
 
         } else if (action.type === 'fill') {
@@ -186,8 +169,13 @@ async function executeActionsOnTab(tabId, actions) {
             else el.value = action.value;
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 200));
             lastResult = { filled: action.target };
           }
+
+        } else if (action.type === 'submit') {
+          const form = document.querySelector('form');
+          if (form) { form.submit(); await new Promise(r => setTimeout(r, 800)); }
 
         } else if (action.type === 'read') {
           lastResult = {
@@ -198,16 +186,63 @@ async function executeActionsOnTab(tabId, actions) {
         }
       }
 
-      return lastResult || { title: document.title, url: window.location.href };
+      return lastResult;
     },
-    args: [JSON.stringify(actions)],
+    args: [JSON.stringify(domActions)],
   });
 
-  const result = results?.[0]?.result;
-  return { success: true, data: result };
+  return { success: true, data: results?.[0]?.result };
 }
 
-// ─── Main Execution Loop ──────────────────────────────────────────────────────
+// ─── Main sequential action processor ────────────────────────────────────────
+// WHY this separation matters:
+//   navigate → must use chrome.tabs.update (changes page, destroys any running script)
+//   wait     → setTimeout in background (between nav and DOM work)
+//   DOM      → batched and sent to executeScript AFTER page is stable
+async function processActionSequence(actions, targetUrl) {
+  let tabId = null;
+  const domActions = [];
+
+  for (const action of actions) {
+    if (action.type === 'navigate') {
+      // Flush any queued DOM actions on the current tab first
+      if (tabId && domActions.length > 0) {
+        await runDomActionsOnTab(tabId, [...domActions]);
+        domActions.length = 0;
+      }
+      // Navigate using browser API (NOT window.location.href in a script)
+      tabId = await getOrCreateTab(action.target.trim());
+      await waitForTabLoad(tabId);
+      await new Promise(r => setTimeout(r, 2000)); // Wait for SPA hydration
+
+    } else if (action.type === 'wait') {
+      // Flush DOM actions first, then wait
+      if (tabId && domActions.length > 0) {
+        await runDomActionsOnTab(tabId, [...domActions]);
+        domActions.length = 0;
+      }
+      await new Promise(r => setTimeout(r, action.ms || 1000));
+
+    } else {
+      // Queue DOM action (click, fill, read, submit)
+      domActions.push(action);
+    }
+  }
+
+  // Flush remaining DOM actions
+  if (tabId && domActions.length > 0) {
+    return await runDomActionsOnTab(tabId, domActions);
+  }
+
+  // If no DOM actions at end, just read the current page state
+  if (tabId) {
+    return await runDomActionsOnTab(tabId, [{ type: 'read', target: 'page' }]);
+  }
+
+  return { success: false, error: 'No tab was opened' };
+}
+
+// ─── Polling Loop ─────────────────────────────────────────────────────────────
 async function pollCompanionApp() {
   if (self.isPolling) return;
   self.isPolling = true;
@@ -219,38 +254,28 @@ async function pollCompanionApp() {
     const task = await res.json();
     if (!task || !task.id) return;
 
-    console.log('[AgentBridge] Executing task:', task.id, task.capability?.name);
+    console.log('[AgentBridge] Task received:', task.id, task.capability?.name);
     self.agentStatus = 'executing';
 
     let result;
     try {
       const actions = task.actions || [{ type: 'read', target: 'page' }];
-
-      // Get or create a tab for the target URL
       const targetUrl = (task.targetUrl || '').trim() || 'https://www.google.com';
-      const tabId = await getOrCreateTab(actions[0]?.target || targetUrl);
-
-      // Wait for initial page load
-      await waitForTabLoad(tabId);
-      await new Promise(r => setTimeout(r, 500));
-
-      // Execute actions via chrome.scripting (not sendMessage — avoids channel timeout)
-      result = await executeActionsOnTab(tabId, actions);
-
+      result = await processActionSequence(actions, targetUrl);
     } catch (execErr) {
       console.error('[AgentBridge] Execution error:', execErr.message);
       result = { success: false, error: execErr.message };
     }
 
-    // Report result back to companion
+    // Report result to companion
     await fetch(`${API_BASE}/api/extension/result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: task.id, result }),
     });
 
-    self.agentStatus = result.success ? 'idle' : 'error';
-    console.log('[AgentBridge] Task complete:', task.id, result.success ? '✅' : '❌');
+    self.agentStatus = result?.success ? 'idle' : 'error';
+    console.log('[AgentBridge] Task done:', task.id, result?.success ? '✅' : '❌', result);
 
   } catch (err) {
     console.warn('[AgentBridge] Poll error:', err.message);
@@ -260,6 +285,6 @@ async function pollCompanionApp() {
   }
 }
 
-// Start
+// ─── Init ─────────────────────────────────────────────────────────────────────
 pingHealth();
 pollCompanionApp();
