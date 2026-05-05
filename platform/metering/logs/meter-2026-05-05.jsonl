@@ -5,3 +5,4 @@
 {"eventId":"evt_1778001678093_8a0781a","timestamp":"2026-05-05T17:21:18.093Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":25030,"success":true}
 {"eventId":"evt_1778001687203_urjxxbe","timestamp":"2026-05-05T17:21:27.202Z","agentId":"claude-desktop","bridgeId":"googlecalendar-com","capabilityId":"events.create","executionPath":"browser","latencyMs":74,"success":true}
 {"eventId":"evt_1778003711423_s9hwcmi","timestamp":"2026-05-05T17:55:11.419Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":9138,"success":true}
+{"eventId":"evt_1778004162632_jgi86v3","timestamp":"2026-05-05T18:02:42.628Z","agentId":"claude-desktop","bridgeId":"calendar-google-com","capabilityId":"calendar.create_event","executionPath":"browser","latencyMs":4048,"success":true}
