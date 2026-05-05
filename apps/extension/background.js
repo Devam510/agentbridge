@@ -1,12 +1,13 @@
 /**
  * background.js — AgentBridge Extension Service Worker (MV3)
- * WHY: Service workers handle message passing, command polling, and real browser execution.
- * Phase 7: Universal executor — reads actions from Companion and runs them on live tabs.
+ * Root-cause fix: Chrome closes message channels for long-running content script operations.
+ * Solution: Use chrome.scripting.executeScript (returns a Promise) instead of 
+ * chrome.tabs.sendMessage for sequences that take longer than ~5 seconds.
  */
 
 const API_BASE = 'http://localhost:3001';
 
-// ─── Keep-Alive (MV3 Service Worker must be kept awake) ──────────────────────
+// ─── Keep-Alive ───────────────────────────────────────────────────────────────
 chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'keepAlive') {
@@ -60,22 +61,20 @@ async function pingHealth() {
 
 // ─── Tab Hijacking: Get or create a tab for a given URL ──────────────────────
 async function getOrCreateTab(targetUrl) {
-  const hostname = new URL(targetUrl).hostname;
+  const hostname = new URL(targetUrl.trim()).hostname;
   const existing = await chrome.tabs.query({ url: `*://${hostname}/*` });
   if (existing.length > 0) {
-    // Tab already exists — bring it to focus and navigate it
     await chrome.tabs.update(existing[0].id, { url: targetUrl, active: false });
     return existing[0].id;
   }
-  // No existing tab — open a new one in the background
   const tab = await chrome.tabs.create({ url: targetUrl, active: false });
   return tab.id;
 }
 
-// ─── Wait for a tab to finish loading ────────────────────────────────────────
+// ─── Wait for tab to finish loading ──────────────────────────────────────────
 function waitForTabLoad(tabId) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Tab load timeout')), 20000);
+    const timeout = setTimeout(() => reject(new Error('Tab load timeout after 20s')), 20000);
     function listener(id, changeInfo) {
       if (id === tabId && changeInfo.status === 'complete') {
         clearTimeout(timeout);
@@ -83,33 +82,129 @@ function waitForTabLoad(tabId) {
         resolve();
       }
     }
-    chrome.tabs.onUpdated.addListener(listener);
-  });
-}
-
-// ─── Execute DOM actions on a tab via content script ─────────────────────────
-async function executeActionsOnTab(tabId, actions) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_SEQUENCE', actions }, (response) => {
-      if (chrome.runtime.lastError) {
-        // Content script not ready — inject it first then retry
-        chrome.scripting.executeScript({
-          target: { tabId },
-          files: ['executor-content.js'],
-        }, () => {
-          chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_SEQUENCE', actions }, (retryResponse) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else {
-              resolve(retryResponse);
-            }
-          });
-        });
+    // Check if already loaded
+    chrome.tabs.get(tabId, (tab) => {
+      if (tab.status === 'complete') {
+        clearTimeout(timeout);
+        resolve();
       } else {
-        resolve(response);
+        chrome.tabs.onUpdated.addListener(listener);
       }
     });
   });
+}
+
+// ─── Execute actions via chrome.scripting.executeScript ──────────────────────
+// WHY: We use executeScript instead of sendMessage because Chrome's message channel
+// closes after ~5s for async responses. executeScript returns a Promise that
+// waits for the full execution — no channel timeout issue.
+async function executeActionsOnTab(tabId, actions) {
+  // First ensure the content script is injected
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['executor-content.js'],
+    });
+  } catch (_) {
+    // Already injected — ignore error
+  }
+
+  // Execute actions via injected function (not messaging)
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (actionsJson) => {
+      const actions = JSON.parse(actionsJson);
+
+      // Inline action executor (mirrors executor-content.js logic)
+      // WHY: We inline it here because chrome.scripting.executeScript
+      // can't call functions defined in content scripts.
+
+      async function wait(ms) {
+        return new Promise(r => setTimeout(r, ms));
+      }
+
+      function findEl(target, role) {
+        if (!target) return null;
+        const t = String(target).toLowerCase().trim();
+
+        // Try pipe-separated fallbacks
+        const targets = t.split('|').map(x => x.trim());
+        for (const tgt of targets) {
+          let el = document.querySelector(`[aria-label="${tgt}"]`)
+            || document.querySelector(`[aria-label*="${tgt}"]`);
+          if (el) return el;
+
+          if (!role || role === 'button') {
+            const btns = [...document.querySelectorAll('button, [role="button"], [jsname]')];
+            el = btns.find(b => b.textContent.trim().toLowerCase().includes(tgt));
+            if (el) return el;
+          }
+
+          const labels = [...document.querySelectorAll('label')];
+          const label = labels.find(l => l.textContent.trim().toLowerCase().includes(tgt));
+          if (label) {
+            if (label.htmlFor) { el = document.getElementById(label.htmlFor); if (el) return el; }
+            el = label.querySelector('input, textarea, select'); if (el) return el;
+          }
+
+          el = document.querySelector(`input[placeholder*="${tgt}"]`)
+            || document.querySelector(`textarea[placeholder*="${tgt}"]`)
+            || document.querySelector(`input[name="${tgt}"]`);
+          if (el) return el;
+
+          try { el = document.querySelector(tgt); } catch {}
+          if (el) return el;
+        }
+        return null;
+      }
+
+      let lastResult = null;
+      for (const action of actions) {
+        if (action.type === 'wait') {
+          await wait(action.ms || 1000);
+
+        } else if (action.type === 'navigate') {
+          window.location.href = action.target;
+          await wait(3000); // Give page time to start loading
+
+        } else if (action.type === 'click') {
+          const el = findEl(action.target, 'button');
+          if (el) {
+            el.click();
+            await wait(500);
+            lastResult = { clicked: action.target, url: window.location.href };
+          } else {
+            lastResult = { clickFailed: action.target, url: window.location.href };
+          }
+
+        } else if (action.type === 'fill') {
+          const el = findEl(action.target, 'input');
+          if (el) {
+            el.focus();
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) nativeSetter.call(el, action.value);
+            else el.value = action.value;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            lastResult = { filled: action.target };
+          }
+
+        } else if (action.type === 'read') {
+          lastResult = {
+            title: document.title,
+            url: window.location.href,
+            content: document.body.innerText.substring(0, 3000),
+          };
+        }
+      }
+
+      return lastResult || { title: document.title, url: window.location.href };
+    },
+    args: [JSON.stringify(actions)],
+  });
+
+  const result = results?.[0]?.result;
+  return { success: true, data: result };
 }
 
 // ─── Main Execution Loop ──────────────────────────────────────────────────────
@@ -129,38 +224,25 @@ async function pollCompanionApp() {
 
     let result;
     try {
-      // 1. Get or create a tab for the target
-      const tabId = await getOrCreateTab(task.targetUrl);
-
-      // 2. Wait for the page to fully load (event-driven, not fixed timer)
-      await waitForTabLoad(tabId);
-
-      // 3. Small buffer for SPA hydration
-      await new Promise(r => setTimeout(r, 800));
-
-      // 4. Execute the action sequence via the content script
       const actions = task.actions || [{ type: 'read', target: 'page' }];
-      const executionResult = await executeActionsOnTab(tabId, actions);
 
-      // 5. Fallback: if content script failed, do a raw page text extraction
-      if (!executionResult || !executionResult.success) {
-        const fallback = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: () => ({
-            title: document.title,
-            content: document.body.innerText.substring(0, 6000),
-            url: window.location.href,
-          }),
-        });
-        result = { success: true, data: fallback[0].result };
-      } else {
-        result = executionResult;
-      }
+      // Get or create a tab for the target URL
+      const targetUrl = (task.targetUrl || '').trim() || 'https://www.google.com';
+      const tabId = await getOrCreateTab(actions[0]?.target || targetUrl);
+
+      // Wait for initial page load
+      await waitForTabLoad(tabId);
+      await new Promise(r => setTimeout(r, 500));
+
+      // Execute actions via chrome.scripting (not sendMessage — avoids channel timeout)
+      result = await executeActionsOnTab(tabId, actions);
+
     } catch (execErr) {
+      console.error('[AgentBridge] Execution error:', execErr.message);
       result = { success: false, error: execErr.message };
     }
 
-    // 6. Report result back to the Companion App
+    // Report result back to companion
     await fetch(`${API_BASE}/api/extension/result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -171,15 +253,13 @@ async function pollCompanionApp() {
     console.log('[AgentBridge] Task complete:', task.id, result.success ? '✅' : '❌');
 
   } catch (err) {
-    // Companion app might be down or request timed out — silent ignore
     console.warn('[AgentBridge] Poll error:', err.message);
   } finally {
     self.isPolling = false;
-    // Immediately re-poll to stay responsive
     setTimeout(pollCompanionApp, 500);
   }
 }
 
-// Start everything
+// Start
 pingHealth();
 pollCompanionApp();
