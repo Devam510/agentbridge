@@ -96,9 +96,14 @@ async function getOrCreateTab(targetUrl) {
 }
 
 // ─── Wait for a tab to finish loading ────────────────────────────────────────
-function waitForTabLoad(tabId, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Tab load timeout')), timeoutMs);
+function waitForTabLoad(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    // Phase 10: DO NOT REJECT on timeout! SPAs like Instagram might never fire 'complete'.
+    // We have retry loops in executor-content.js to handle slow-loading elements anyway.
+    const timer = setTimeout(() => {
+      console.warn(`[AgentBridge] Tab load timed out after ${timeoutMs}ms. Proceeding anyway.`);
+      resolve();
+    }, timeoutMs);
     function listener(id, changeInfo) {
       if (id === tabId && changeInfo.status === 'complete') {
         clearTimeout(timer);
