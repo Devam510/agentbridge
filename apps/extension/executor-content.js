@@ -90,11 +90,42 @@ window.AgentBridgeExecutor = (function() {
     return null;
   }
 
-  // Retry loop for SPA dynamic rendering
-  async function findEl(target, preferRole, retries = 6, delay = 500) {
+  // Phase 10: Auto-scrolling for virtualized lists
+  function getScrollableContainers() {
+    const containers = [];
+    if (document.documentElement.scrollHeight > document.documentElement.clientHeight) {
+      containers.push(window);
+    }
+    const allElements = document.querySelectorAll('*');
+    for (const el of allElements) {
+      if (el.scrollHeight > el.clientHeight) {
+        const style = window.getComputedStyle(el);
+        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+          containers.push(el);
+        }
+      }
+    }
+    return containers;
+  }
+
+  // Retry loop for SPA dynamic rendering + Auto-scrolling
+  async function findEl(target, preferRole, retries = 8, delay = 600) {
     for (let i = 0; i < retries; i++) {
       const el = findElSync(target, preferRole);
       if (el) return el;
+      
+      // Phase 10: Active Search Scrolling if not found
+      if (i > 0) {
+        const scrollables = getScrollableContainers();
+        for (const container of scrollables) {
+          if (container === window) {
+            window.scrollBy({ top: 400, behavior: 'smooth' });
+          } else {
+            container.scrollBy({ top: 400, behavior: 'smooth' });
+          }
+        }
+      }
+      
       await wait(delay);
     }
     return null;

@@ -1,3 +1,5 @@
 {"eventId":"evt_1778085121833_hbhg0r5","timestamp":"2026-05-06T16:32:01.805Z","agentId":"claude-desktop","bridgeId":"instagram-com","capabilityId":"conversations.list","executionPath":"browser","latencyMs":5599,"success":true}
 {"eventId":"evt_1778085145394_oh9vp4j","timestamp":"2026-05-06T16:32:25.394Z","agentId":"claude-desktop","bridgeId":"instagram-com","capabilityId":"messages.send","executionPath":"browser","latencyMs":6272,"success":true}
 {"eventId":"evt_1778085236155_x7gia3b","timestamp":"2026-05-06T16:33:56.154Z","agentId":"claude-desktop","bridgeId":"instagram-com","capabilityId":"messages.send","executionPath":"browser","latencyMs":5796,"success":true}
+{"eventId":"evt_1778086265031_0fi847f","timestamp":"2026-05-06T16:51:05.031Z","agentId":"claude-desktop","bridgeId":"instagram-com","capabilityId":"conversations.create","executionPath":"browser","latencyMs":31618,"success":true}
+{"eventId":"evt_1778086275002_bjhhob3","timestamp":"2026-05-06T16:51:15.002Z","agentId":"claude-desktop","bridgeId":"instagram-com","capabilityId":"messages.send","executionPath":"browser","latencyMs":5419,"success":true}
