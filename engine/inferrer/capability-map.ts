@@ -42,6 +42,7 @@ export const CapabilityMapSchema = z.object({
   generatedAt: z.string(),
   capabilities: z.array(CapabilitySchema),
   categories: z.array(z.string()),
+  siteNavMap: z.record(z.string()).optional(),
 });
 
 export type Parameter = z.infer<typeof ParameterSchema>;

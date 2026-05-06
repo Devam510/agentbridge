@@ -5,10 +5,10 @@
  * Generates robust action sequences for Login, Create, Delete, Search, and read-only.
  */
 
-import { Capability } from '../inferrer/capability-map.js';
+import { Capability, CapabilityMap } from '../inferrer/capability-map.js';
 
 export interface DOMAction {
-  type: 'navigate' | 'click' | 'fill' | 'selectOption' | 'checkBox' | 'hover' | 'pressKey' | 'waitForElement' | 'read' | 'submit' | 'wait';
+  type: 'navigate' | 'click' | 'fill' | 'selectOption' | 'checkBox' | 'hover' | 'pressKey' | 'waitForElement' | 'read' | 'submit' | 'wait' | 'findAndNavigate';
   target?: string;
   value?: string;
   ms?: number;
@@ -74,12 +74,41 @@ function buildGoogleCalendarCreateUrl(params: Record<string, unknown>): string {
   return url;
 }
 
+// ─── Intent URL Resolver (Phase 9B) ──────────────────────────────────────────
+
+function resolveUrl(capability: Capability, capMap: CapabilityMap | undefined, baseUrl: string): string {
+  const intentLow = (capability.name + ' ' + capability.id).toLowerCase();
+  
+  // 1. Check if we have a siteNavMap
+  if (capMap?.siteNavMap) {
+    for (const [intentKey, mappedUrl] of Object.entries(capMap.siteNavMap)) {
+      if (intentLow.includes(intentKey)) {
+        // If mappedUrl is absolute
+        if (mappedUrl.startsWith('http')) return mappedUrl;
+        // If mappedUrl is relative, join it
+        try { return new URL(mappedUrl, baseUrl).href; } catch { return baseUrl; }
+      }
+    }
+  }
+  
+  // 2. Fall back to capability's sourceLocation
+  if (capability.sourceLocation) {
+    const loc = capability.sourceLocation.trim();
+    if (loc.startsWith('http')) return loc;
+    try { return new URL(loc, baseUrl).href; } catch { return `${baseUrl}${loc}`; }
+  }
+  
+  // 3. Fall back to baseUrl
+  return baseUrl;
+}
+
 // ─── Main Builder ────────────────────────────────────────────────────────────
 
 export function buildActionSequence(
   capability: Capability,
   params: Record<string, unknown>,
   baseUrl: string,
+  capabilityMap?: CapabilityMap
 ): ActionSequence {
   const actions: DOMAction[] = [];
   const confirmationHints: string[] = [];
@@ -98,11 +127,15 @@ export function buildActionSequence(
     return { actions, confirmationHints, targetUrl: createUrl };
   }
 
-  const targetUrl = (capability.sourceLocation || baseUrl).trim().startsWith('http')
-    ? (capability.sourceLocation || baseUrl).trim()
-    : `${baseUrl}${capability.sourceLocation}`;
+  // Phase 9B: Smart URL Discovery
+  const targetUrl = resolveUrl(capability, capabilityMap, baseUrl);
 
   actions.push({ type: 'navigate', target: targetUrl });
+  
+  if (targetUrl === baseUrl) {
+    const intent = capability.name.split(' ')[0] || capability.id;
+    actions.push({ type: 'findAndNavigate', target: intent });
+  }
   
   // Helper to fill parameters safely
   const pushParamFills = () => {
@@ -115,7 +148,7 @@ export function buildActionSequence(
       
       if (param.type === 'boolean') {
         actions.push({ type: 'checkBox', target: fieldTarget, value: String(value) });
-      } else if (param.type === 'enum' || fieldTarget.toLowerCase().includes('select') || fieldTarget.toLowerCase().includes('dropdown') || fieldTarget.toLowerCase().includes('country')) {
+      } else if ((param.enum && param.enum.length > 0) || fieldTarget.toLowerCase().includes('select') || fieldTarget.toLowerCase().includes('dropdown') || fieldTarget.toLowerCase().includes('country')) {
         actions.push({ type: 'selectOption', target: fieldTarget, value: String(value) });
       } else {
         actions.push({ type: 'fill', target: fieldTarget, value: String(value) });

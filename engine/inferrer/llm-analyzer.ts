@@ -245,6 +245,7 @@ export async function analyzeWithLLM(
     generatedAt: new Date().toISOString(),
     capabilities: validCapabilities,
     categories,
+    siteNavMap: crawlResult.siteNavMap,
   };
 
   // Final validation of complete map

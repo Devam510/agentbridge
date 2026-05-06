@@ -21,6 +21,7 @@ export interface SiteCrawlResult {
   pagesVisited: number;
   pages: CrawledPageData[];
   errors: string[];
+  siteNavMap: Record<string, string>;
 }
 
 export interface CrawlOptions {
@@ -122,11 +123,36 @@ export async function crawlSite(
     throw new Error(`Failed to crawl the website. Make sure the URL is correct and accessible. Details: ${errors[0]}`);
   }
 
+  // Build siteNavMap from all pages' navigation links
+  const siteNavMap: Record<string, string> = {};
+  const intentKeywords = {
+    'message': ['message', 'dm', 'chat', 'inbox', 'send', 'direct'],
+    'settings': ['settings', 'account', 'preferences', 'profile'],
+    'notifications': ['notifications', 'alerts'],
+    'search': ['search', 'find', 'discover', 'explore'],
+    'create': ['create', 'add', 'new', 'compose', 'post'],
+    'home': ['home', 'feed', 'timeline', 'dashboard']
+  };
+
+  for (const pageData of results) {
+    for (const link of pageData.page.links) {
+      if (!link.isNavigation) continue;
+      const text = link.text.toLowerCase();
+      
+      for (const [intent, keywords] of Object.entries(intentKeywords)) {
+        if (!siteNavMap[intent] && keywords.some(k => text.includes(k))) {
+          siteNavMap[intent] = link.href;
+        }
+      }
+    }
+  }
+
   return {
     baseUrl,
     crawledAt: new Date().toISOString(),
     pagesVisited: visited.size,
     pages: results,
     errors,
+    siteNavMap,
   };
 }

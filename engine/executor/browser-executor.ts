@@ -31,7 +31,7 @@ export interface ExecuteResult {
 export class BridgeExecutor {
   private targetUrl: string;
   private capabilityMap: CapabilityMap;
-  private session: BrowserSession | null = null;
+
   private apiCredentials?: Record<string, string>;
 
   constructor(options: { targetUrl: string; capabilityMap: CapabilityMap; apiCredentials?: Record<string, string> }) {
@@ -136,8 +136,7 @@ export class BridgeExecutor {
   ): Promise<{ success: boolean; data: Record<string, unknown>; errorMessage?: string }> {
     try {
       // Phase 7: Build a structured action sequence and send it to the Chrome Extension
-      // via the Companion App. The extension executes this on the user's real browser.
-      const sequence = buildActionSequence(capability, params, this.targetUrl);
+      const sequence = buildActionSequence(capability, params, this.targetUrl, this.capabilityMap);
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 50000); // 50s timeout

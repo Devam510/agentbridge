@@ -56,7 +56,10 @@ import * as path from 'path';
 // ── Bridge Creation (Mock for MVP) ─────────────────────────────────────────
 app.post('/api/bridge/create', (req, res) => {
   const { url, bridgeName } = req.body;
-  if (!url) { return res.status(400).json({ error: 'url required' }); }
+  if (!url) {
+    res.status(400).json({ error: 'url required' });
+    return;
+  }
   const name = bridgeName || new URL(url).hostname.replace(/^www\./, '').replace(/\./g, '-');
   res.json({ bridgeName: name, endpoint: 'local', status: 'queued' });
 });

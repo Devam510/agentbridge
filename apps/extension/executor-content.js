@@ -72,7 +72,16 @@ window.AgentBridgeExecutor = (function() {
       el = inputs.find(isVisibleAndEnabled);
       if (el) return el;
       
-      // 5. Raw CSS
+      // 5. ContentEditables (Phase 9A)
+      const editables = querySelectorAllDeep('[contenteditable="true"], [role="textbox"]');
+      el = editables.find(e => isVisibleAndEnabled(e) && (
+        (e.getAttribute('aria-label') || '').toLowerCase().includes(tgtLow) ||
+        (e.getAttribute('aria-placeholder') || '').toLowerCase().includes(tgtLow) ||
+        (e.textContent || '').toLowerCase().includes(tgtLow)
+      ));
+      if (el) return el;
+      
+      // 6. Raw CSS
       try { 
         el = querySelectorAllDeep(tgt).find(isVisibleAndEnabled); 
         if (el) return el;
@@ -112,23 +121,42 @@ window.AgentBridgeExecutor = (function() {
   }
 
   async function performFill(target, value) {
-    const el = await findEl(target, 'input');
+    let el = await findEl(target, 'input');
+    
+    // Fallback: If target wasn't found by specific match, just find the first visible contenteditable
+    if (!el && (target.toLowerCase() === 'message' || target.toLowerCase() === 'chat' || target.toLowerCase() === 'reply')) {
+      const editables = querySelectorAllDeep('[contenteditable="true"], [role="textbox"]');
+      el = editables.find(isVisibleAndEnabled);
+    }
+    
     if (el) {
       await scrollTo(el);
       el.focus();
+      await wait(100);
       
-      // Phase 8E: Native setter bypasses React synthetic events
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (nativeSetter) {
-        nativeSetter.call(el, value);
+      if (el.isContentEditable) {
+        // Phase 9A: ContentEditable path
+        el.textContent = '';
+        el.focus();
+        document.execCommand('insertText', false, value);
+        if (!el.textContent) {
+          el.textContent = value;
+          el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        }
       } else {
-        el.value = value;
+        // Phase 8E: Native setter bypasses React synthetic events
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+          nativeSetter.call(el, value);
+        } else {
+          el.value = value;
+        }
+        
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
       }
-      
-      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
       
       await wait(200);
       return { filled: target };
@@ -171,6 +199,28 @@ window.AgentBridgeExecutor = (function() {
       return { checkBox: target, checked: shouldBeChecked };
     }
     return { checkBoxFailed: target };
+  }
+
+  // Phase 9B: Dynamic navigation fallback
+  async function performFindAndNavigate(intent) {
+    const links = querySelectorAllDeep('a[href], [role="link"]');
+    const intentLow = intent.toLowerCase();
+    
+    // Exact match first
+    let match = links.find(l => l.textContent.trim().toLowerCase() === intentLow && isVisibleAndEnabled(l));
+    
+    // Partial match
+    if (!match) {
+      match = links.find(l => l.textContent.toLowerCase().includes(intentLow) && isVisibleAndEnabled(l));
+    }
+    
+    if (match) {
+      await scrollTo(match);
+      match.click();
+      await wait(2000);
+      return { navigatedVia: 'link', text: match.textContent.trim(), url: window.location.href };
+    }
+    return { notFound: intent };
   }
 
   async function performHover(target) {
@@ -232,6 +282,8 @@ window.AgentBridgeExecutor = (function() {
         lastResult = await performPressKey(action.target);
       } else if (action.type === 'waitForElement') {
         lastResult = await performWaitForElement(action.target, action.value);
+      } else if (action.type === 'findAndNavigate') {
+        lastResult = await performFindAndNavigate(action.target);
       } else if (action.type === 'submit') {
         const form = document.querySelector('form');
         if (form) { form.submit(); await wait(800); }
