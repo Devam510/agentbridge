@@ -10,6 +10,7 @@
 import OpenAI from 'openai';
 import * as fs from 'fs';
 import * as path from 'path';
+import { getLocalLLM } from '../../platform/companion/local-llm.js';
 
 const CACHE_FILE = path.resolve('./engine/healer/selector-cache.json');
 
@@ -62,47 +63,60 @@ export async function healSelector(
     return { selector: cached, healed: false };
   }
 
-  if (!apiKey) {
-    throw new Error('No OpenAI API key for self-healing. Set OPENAI_API_KEY in .env.');
+  const truncatedDom = domSnapshot.slice(0, 6000);
+  const healPrompt = `The automation is looking for: "${intent}".\nHere is the current DOM (truncated):\n${truncatedDom}\n\nReturn a JSON object with the best CSS selector: { "selector": "..." }`;
+  const systemPrompt = 'You are a web automation expert. Given a DOM snapshot and a target intent, return ONLY a JSON object: { "selector": "..." } with a valid CSS selector that matches the element.';
+
+  let rawResponse = '';
+
+  // 2a. Try Local GPU (RTX 1650) first — free, fast, private
+  try {
+    const localLLM = await getLocalLLM();
+    if (localLLM) {
+      console.log('[Healer] Using local GPU for selector healing...');
+      rawResponse = await localLLM.infer(healPrompt, systemPrompt);
+    }
+  } catch (localErr: any) {
+    console.warn('[Healer] Local LLM failed, falling back to OpenAI:', localErr.message);
   }
 
-  const client = new OpenAI({ apiKey });
+  // 2b. Fallback to OpenAI cloud if local unavailable
+  if (!rawResponse && apiKey) {
+    console.log('[Healer] Using OpenAI for selector healing...');
+    const client = new OpenAI({ apiKey });
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: healPrompt },
+            ...(screenshotBase64 ? [{
+              type: 'image_url' as const,
+              image_url: { url: `data:image/webp;base64,${screenshotBase64}`, detail: 'low' as const },
+            }] : []),
+          ],
+        },
+      ],
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+    });
+    rawResponse = response.choices[0]?.message?.content ?? '';
+  }
 
-  // 2. Truncate DOM to avoid token limits (keep first 8000 chars)
-  const truncatedDom = domSnapshot.slice(0, 8000);
+  if (!rawResponse) {
+    throw new Error('No LLM available for healing. Set OPENAI_API_KEY or run: npx tsx scripts/download-model.ts');
+  }
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a web automation expert. Given a DOM snapshot and a target intent, return ONLY a valid CSS selector or aria-label that matches the element. Return a JSON object: { "selector": "...", "type": "css|aria|text" }',
-      },
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: `The automation is looking for: "${intent}".\nHere is the current DOM (truncated):\n${truncatedDom}\n\nReturn the best CSS selector to target this element.`,
-          },
-          ...(screenshotBase64 ? [{
-            type: 'image_url' as const,
-            image_url: { url: `data:image/webp;base64,${screenshotBase64}`, detail: 'low' as const },
-          }] : []),
-        ],
-      },
-    ],
-    temperature: 0.1,
-    response_format: { type: 'json_object' },
-  });
-
+  // 3. Parse selector from response
   let selector = intent; // fallback
   try {
-    const parsed = JSON.parse(response.choices[0]?.message?.content ?? '{}');
+    const parsed = JSON.parse(rawResponse);
     selector = parsed.selector || intent;
   } catch {}
 
-  // 3. Save to global cache
+  // 4. Save to global cache
   const cache = loadCache();
   cache[cacheKey(domain, intent)] = {
     intent,
@@ -115,3 +129,4 @@ export async function healSelector(
 
   return { selector, healed: true };
 }
+

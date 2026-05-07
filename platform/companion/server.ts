@@ -1,9 +1,16 @@
 import express from 'express';
 import cors from 'cors';
+import * as http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import { patchAllConfigs, restartClaude } from './patcher.js';
 import { synthesizeScript } from '../../engine/generator/code-synthesizer.js';
 import { healSelector } from '../../engine/healer/selector-healer.js';
 import { recordSuccess, queryGraph, getGraphForDomain } from '../../engine/routing-graph/agentic-router.js';
+import { getLocalLLM } from './local-llm.js';
+import { initScheduler, createSchedule, deleteSchedule, listSchedules, registerExecuteCallback } from './schedules.js';
+import { saveCredential, getCredential, listVaultEntries, addToVaultIndex, deleteCredential } from './vault.js';
+import { executeChain } from '../../engine/executor/chain-executor.js';
+import { listMarketplaceItems, publishToMarketplace, installFromMarketplace } from '../marketplace/catalog.js';
 
 const app = express();
 const PORT = 3001;
@@ -323,9 +330,178 @@ app.get('/api/graph/domain', (req, res) => {
   res.json({ success: true, results });
 });
 
+// ── Module 7: Local GPU AI Inference ─────────────────────────────────────────
+app.post('/api/ai/infer', async (req, res) => {
+  const { prompt, systemPrompt } = req.body;
+  if (!prompt) { res.status(400).json({ error: 'prompt required' }); return; }
+  try {
+    const localLLM = await getLocalLLM();
+    if (!localLLM) {
+      res.status(503).json({ error: 'Local model not loaded. Run: npx tsx scripts/download-model.ts' });
+      return;
+    }
+    const response = await localLLM.infer(prompt, systemPrompt);
+    res.json({ success: true, response });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/ai/status', async (_req, res) => {
+  const localLLM = await getLocalLLM();
+  res.json({ localModelLoaded: !!localLLM });
+});
+
+// ── Module 12: Scheduled Agents ───────────────────────────────────────────────
+app.get('/api/schedule/list', (_req, res) => {
+  res.json({ success: true, schedules: listSchedules() });
+});
+
+app.post('/api/schedule/create', (req, res) => {
+  const { name, cronExpression, capabilityId, params, targetUrl } = req.body;
+  if (!name || !cronExpression || !capabilityId || !targetUrl) {
+    res.status(400).json({ error: 'name, cronExpression, capabilityId, targetUrl required' });
+    return;
+  }
+  try {
+    const schedule = createSchedule({ name, cronExpression, capabilityId, params: params || {}, targetUrl, enabled: true });
+    res.json({ success: true, schedule });
+  } catch (err: any) { res.status(400).json({ error: err.message }); }
+});
+
+app.delete('/api/schedule/:id', (req, res) => {
+  const deleted = deleteSchedule(req.params.id);
+  res.json({ success: deleted });
+});
+
+// ── Module 13: Credential Vault ───────────────────────────────────────────────
+app.get('/api/vault/list', async (_req, res) => {
+  try {
+    const entries = await listVaultEntries();
+    // Security: only return site + username, NEVER the password
+    res.json({ success: true, entries });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/vault/save', async (req, res) => {
+  const { site, username, password } = req.body;
+  if (!site || !username || !password) {
+    res.status(400).json({ error: 'site, username, password required' });
+    return;
+  }
+  try {
+    await saveCredential(site, username, password);
+    await addToVaultIndex(site);
+    // Security: never echo the password back
+    res.json({ success: true, site, username });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// Internal-only endpoint: used by executor, returns credential for auto-login
+// Security: This endpoint only accepts requests from localhost (CORS policy)
+app.get('/api/vault/get', async (req, res) => {
+  const { site } = req.query as { site: string };
+  if (!site) { res.status(400).json({ error: 'site required' }); return; }
+  try {
+    const cred = await getCredential(site);
+    if (!cred) { res.status(404).json({ error: 'No credential found for this site' }); return; }
+    // Returns both username and password for the executor — NEVER expose this endpoint externally
+    res.json({ success: true, username: cred.username, password: cred.password });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/vault/:site', async (req, res) => {
+  try {
+    const deleted = await deleteCredential(decodeURIComponent(req.params.site));
+    res.json({ success: deleted });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Module 10: Workflow Chains ────────────────────────────────────────────────
+app.post('/api/workflow/run', async (req, res) => {
+  const { chain } = req.body;
+  if (!chain || !chain.steps || !Array.isArray(chain.steps)) {
+    res.status(400).json({ error: 'chain with steps array required' });
+    return;
+  }
+  try {
+    const result = await executeChain(chain);
+    res.json(result);
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Module 9: Action Marketplace ──────────────────────────────────────────────
+app.get('/api/marketplace/list', (req, res) => {
+  const { category } = req.query as { category?: string };
+  res.json({ success: true, items: listMarketplaceItems(category) });
+});
+
+app.post('/api/marketplace/publish', (req, res) => {
+  const { name, description, site, targetUrl, category, author, successRate, actions } = req.body;
+  if (!name || !site || !targetUrl || !actions) {
+    res.status(400).json({ error: 'name, site, targetUrl, actions required' });
+    return;
+  }
+  const item = publishToMarketplace({
+    name, description: description || '', site, targetUrl,
+    category: category || 'general', author: author || 'anonymous',
+    successRate: successRate || 1.0, actions,
+  });
+  res.json({ success: true, item });
+});
+
+app.post('/api/marketplace/install', (req, res) => {
+  const { id } = req.body;
+  if (!id) { res.status(400).json({ error: 'id required' }); return; }
+  const item = installFromMarketplace(id);
+  if (!item) { res.status(404).json({ error: 'Automation not found in marketplace' }); return; }
+  res.json({ success: true, item });
+});
+
+// ── Module 11: Live Telemetry endpoint (from extension) ───────────────────────
+const telemetryClients = new Set<WebSocket>();
+
+app.post('/api/telemetry', (req, res) => {
+  const event = req.body;
+  // Broadcast to all connected dashboard WebSocket clients
+  const payload = JSON.stringify({ type: 'TELEMETRY', event });
+  for (const client of telemetryClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
+    }
+  }
+  res.json({ success: true });
+});
+
 export function startCompanionServer() {
-  app.listen(PORT, () => {
-    console.log(`\n⚡ AgentBridge Companion running silently on http://localhost:${PORT}`);
+  const httpServer = http.createServer(app);
+
+  // Module 11: WebSocket server for live dashboard telemetry (port 3002)
+  // Security: host: '127.0.0.1' binds to loopback ONLY — not accessible from external network
+  const wss = new WebSocketServer({ port: 3002, host: '127.0.0.1' });
+  wss.on('connection', (ws) => {
+    telemetryClients.add(ws);
+    console.log('[Telemetry] Dashboard client connected');
+    ws.on('close', () => {
+      telemetryClients.delete(ws);
+      console.log('[Telemetry] Dashboard client disconnected');
+    });
+    // Send initial connection ack
+    ws.send(JSON.stringify({ type: 'CONNECTED', message: 'AgentBridge Live Monitor connected' }));
+  });
+
+  // Module 12: Register scheduler execute callback and start cron jobs
+  registerExecuteCallback(async (capabilityId, params, targetUrl) => {
+    const response = await fetch(`http://localhost:${PORT}/api/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ capability: { id: capabilityId, name: capabilityId }, params, targetUrl, actions: [] }),
+    });
+    if (!response.ok) throw new Error(`Scheduled execution failed: HTTP ${response.status}`);
+  });
+  initScheduler();
+
+  httpServer.listen(PORT, () => {
+    console.log(`\n⚡ AgentBridge Companion running on http://localhost:${PORT}`);
+    console.log(`📡 Live Dashboard WebSocket on ws://localhost:3002`);
     console.log(`   Waiting for extension requests...\n`);
   });
 }

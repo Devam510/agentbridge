@@ -1,9 +1,10 @@
 /**
  * executor-content.js — Universal DOM Action Engine
- * 
+ *
  * Phase 8A: Bulletproof Element Finder (Shadow DOM, iframes, visibility, retry loops)
  * Phase 8B: New Action Types (hover, pressKey, selectOption, checkBox, etc.)
  * Phase 8E: Password & Credentials Handling
+ * Phase 12: Module 11 Telemetry, Module 13 Auto-Login
  */
 
 // We attach to window so background.js can call it via executeScript without message passing
@@ -11,6 +12,69 @@ window.AgentBridgeExecutor = (function() {
   
   async function wait(ms) {
     return new Promise(r => setTimeout(r, ms));
+  }
+
+  // Module 11: Telemetry — emit step events to the Live Dashboard
+  async function emitTelemetry(type, target, status) {
+    try {
+      await fetch('http://localhost:3001/api/telemetry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type, target, status,
+          url: window.location.href,
+          timestamp: Date.now(),
+        }),
+      });
+    } catch { /* telemetry is non-critical */ }
+  }
+
+  // Module 13: Auto-Login — fetch credentials from vault and fill login form
+  async function performLogin(site) {
+    try {
+      const res = await fetch(`http://localhost:3001/api/vault/get?site=${encodeURIComponent(site)}`);
+      if (!res.ok) return { loginFailed: `No credentials stored for ${site}` };
+      const { username, password } = await res.json();
+
+      // Find and fill username field
+      const usernameEl = await findEl('username|email|phone|login', 'input');
+      if (usernameEl) {
+        await scrollTo(usernameEl);
+        usernameEl.focus();
+        usernameEl.value = username;
+        usernameEl.dispatchEvent(new Event('input', { bubbles: true }));
+        usernameEl.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      await wait(300);
+
+      // Find and fill password field
+      const passwordInputs = document.querySelectorAll('input[type="password"]');
+      const passwordEl = Array.from(passwordInputs).find(el => isVisibleAndEnabled(el));
+      if (passwordEl) {
+        passwordEl.focus();
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+          nativeSetter.call(passwordEl, password);
+          passwordEl.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          passwordEl.value = password;
+        }
+      }
+
+      await wait(300);
+
+      // Click submit/sign-in button
+      const submitEl = await findEl('sign in|login|log in|continue|submit', 'button');
+      if (submitEl) {
+        submitEl.click();
+        await wait(2000);
+      }
+
+      return { loggedIn: site };
+    } catch (err) {
+      return { loginFailed: err.message };
+    }
   }
 
   // ─── Phase 8A: Bulletproof Element Finder ─────────────────────────────────
@@ -324,12 +388,21 @@ window.AgentBridgeExecutor = (function() {
     let lastResult = { title: document.title, url: window.location.href };
 
     for (const action of actions) {
+      // Module 11: Emit telemetry before each action so Live Dashboard shows progress
+      emitTelemetry(action.type, action.target || '', 'running');
+
       if (action.type === 'wait') {
         await wait(action.ms || 500);
       } else if (action.type === 'click') {
         lastResult = await performClick(action.target);
+        emitTelemetry('click', action.target, lastResult.clickFailed ? 'error' : 'success');
       } else if (action.type === 'fill') {
         lastResult = await performFill(action.target, action.value);
+        emitTelemetry('fill', action.target, 'success');
+      } else if (action.type === 'login') {
+        // Module 13: Auto-login using credentials from the Credential Vault
+        lastResult = await performLogin(action.target);
+        emitTelemetry('login', action.target, lastResult.loginFailed ? 'error' : 'success');
       } else if (action.type === 'selectOption') {
         lastResult = await performSelectOption(action.target, action.value);
       } else if (action.type === 'checkBox') {
@@ -345,6 +418,7 @@ window.AgentBridgeExecutor = (function() {
       } else if (action.type === 'submit') {
         const form = document.querySelector('form');
         if (form) { form.submit(); await wait(800); }
+        emitTelemetry('submit', 'form', 'success');
       } else if (action.type === 'read') {
         lastResult = performRead();
       }
