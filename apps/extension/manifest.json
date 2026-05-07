@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AgentBridge",
-  "version": "1.0.0",
-  "description": "Bridge any website to your AI agent (Claude, Cursor) in 30 seconds.",
+  "version": "2.0.0",
+  "description": "Bridge any website to your AI agent. Automate, record, and synthesize workflows with AI.",
   "permissions": ["activeTab", "storage", "nativeMessaging", "alarms", "notifications", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "action": {
@@ -15,8 +15,14 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["executor-content.js"],
+      "js": ["state-injector-content.js", "executor-content.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["recorder-content.js"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

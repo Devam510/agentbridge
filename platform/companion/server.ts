@@ -1,13 +1,33 @@
 import express from 'express';
 import cors from 'cors';
 import { patchAllConfigs, restartClaude } from './patcher.js';
+import { synthesizeScript } from '../../engine/generator/code-synthesizer.js';
+import { healSelector } from '../../engine/healer/selector-healer.js';
+import { recordSuccess, queryGraph, getGraphForDomain } from '../../engine/routing-graph/agentic-router.js';
 
 const app = express();
 const PORT = 3001;
 
-// Allow any origin for now (in production, restrict to chrome-extension://...)
-app.use(cors());
-app.use(express.json());
+// Security: CORS restricted to only localhost (companion) and Chrome Extension origins.
+// In production, replace 'chrome-extension://*' with your specific extension ID.
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  /^chrome-extension:\/\//,
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // Allow non-browser clients (curl, MCP)
+    const allowed = ALLOWED_ORIGINS.some(o =>
+      typeof o === 'string' ? o === origin : o.test(origin)
+    );
+    if (allowed) return callback(null, true);
+    callback(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+}));
+app.use(express.json({ limit: '2mb' })); // Cap payload size against DoS
 
 // ── Health Check ───────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -236,6 +256,71 @@ app.get('/api/health/extension/status', (req, res) => {
   // If we haven't seen the extension in 15s, it disconnected
   const isConnected = Date.now() - lastExtensionPing < 15000; 
   res.json({ connected: isConnected, lastSeen: lastExtensionPing });
+});
+
+// ── Module 1: Demonstration-to-Code — Script Synthesis ──────────────────────
+// WHY: API key lives ONLY here in the backend. Extension never touches OpenAI.
+app.post('/api/recorder/synthesize', async (req, res) => {
+  const { events } = req.body;
+  if (!events || !Array.isArray(events) || events.length === 0) {
+    res.status(400).json({ error: 'No events provided' });
+    return;
+  }
+  try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const result = await synthesizeScript(events, apiKey);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Module 3: Self-Healing — Selector Recovery ───────────────────────────────
+// WHY: Vision model API key stays server-side. Extension sends DOM + screenshot.
+app.post('/api/healer/resolve', async (req, res) => {
+  const { intent, domSnapshot, screenshotBase64, domain } = req.body;
+  if (!intent || !domain) {
+    res.status(400).json({ error: 'intent and domain are required' });
+    return;
+  }
+  try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const result = await healSelector(intent, domSnapshot || '', screenshotBase64 || '', domain, apiKey);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Module 6: Agentic Routing Graph ──────────────────────────────────────────
+app.post('/api/graph/record', (req, res) => {
+  const { intent, domain, actions } = req.body;
+  if (!intent || !domain || !actions) {
+    res.status(400).json({ error: 'intent, domain, and actions are required' });
+    return;
+  }
+  recordSuccess(intent, domain, actions);
+  res.json({ success: true });
+});
+
+app.get('/api/graph/query', (req, res) => {
+  const { intent, domain } = req.query as { intent: string; domain: string };
+  if (!intent || !domain) {
+    res.status(400).json({ error: 'intent and domain query params required' });
+    return;
+  }
+  const result = queryGraph(intent, domain);
+  res.json({ success: true, result });
+});
+
+app.get('/api/graph/domain', (req, res) => {
+  const { domain } = req.query as { domain: string };
+  if (!domain) {
+    res.status(400).json({ error: 'domain query param required' });
+    return;
+  }
+  const results = getGraphForDomain(domain);
+  res.json({ success: true, results });
 });
 
 export function startCompanionServer() {

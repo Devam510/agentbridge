@@ -108,7 +108,7 @@ window.AgentBridgeExecutor = (function() {
     return containers;
   }
 
-  // Retry loop for SPA dynamic rendering + Auto-scrolling
+  // Retry loop for SPA dynamic rendering + Auto-scrolling + Self-Healing fallback
   async function findEl(target, preferRole, retries = 8, delay = 600) {
     for (let i = 0; i < retries; i++) {
       const el = findElSync(target, preferRole);
@@ -128,6 +128,28 @@ window.AgentBridgeExecutor = (function() {
       
       await wait(delay);
     }
+
+    // Module 3: Self-Healing — Ask the backend to find a new selector
+    try {
+      const domain = window.location.hostname.replace(/^www\./, '');
+      const domSnapshot = document.body?.innerHTML?.slice(0, 8000) ?? '';
+      const healRes = await fetch('http://localhost:3001/api/healer/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intent: target, domSnapshot, screenshotBase64: '', domain }),
+      });
+      if (healRes.ok) {
+        const { selector } = await healRes.json();
+        if (selector && selector !== target) {
+          const healed = document.querySelector(selector);
+          if (healed && isVisibleAndEnabled(healed)) {
+            console.warn(`[AgentBridge] Self-healed: "${target}" → "${selector}"`);
+            return healed;
+          }
+        }
+      }
+    } catch { /* healing is non-critical */ }
+
     return null;
   }
 
@@ -144,8 +166,13 @@ window.AgentBridgeExecutor = (function() {
     const el = await findEl(target, 'button');
     if (el) {
       await scrollTo(el);
-      el.click();
-      await wait(800);
+      // Module 8: Try synthetic React click first (100x faster for SPAs)
+      if (window.__AgentBridgeStateInjector) {
+        window.__AgentBridgeStateInjector.syntheticClick(el);
+      } else {
+        el.click();
+      }
+      await wait(600);
       return { clicked: target };
     }
     return { clickFailed: target };

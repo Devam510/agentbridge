@@ -11,6 +11,10 @@
 
 const API_BASE = 'http://localhost:3001';
 
+// ─── Module 1: Recorder State ────────────────────────────────────────────────
+self.isRecording = false;
+self.recordedEvents = [];
+
 // ─── Keep-Alive ───────────────────────────────────────────────────────────────
 // periodInMinutes: 0.33 is ~20 seconds
 chrome.alarms.create('keepAlive', { periodInMinutes: 0.33 });
@@ -44,6 +48,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === 'GET_STATUS') {
     sendResponse({ status: self.agentStatus || 'idle', connected: self.companionConnected || false });
+  }
+
+  // Module 1: Recorder messages
+  if (message.type === 'RECORDER_START') {
+    self.isRecording = true;
+    self.recordedEvents = [];
+    // Inject recorder into active tab
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]?.id) {
+        chrome.scripting.executeScript({
+          target: { tabId: tabs[0].id },
+          files: ['recorder-content.js'],
+        }).catch(() => {});
+      }
+    });
+    sendResponse({ success: true });
+    return true;
+  }
+  if (message.type === 'RECORDER_STOP') {
+    self.isRecording = false;
+    const events = self.recordedEvents || [];
+    self.recordedEvents = [];
+    // Send events to companion server for synthesis
+    fetch(`${API_BASE}/api/recorder/synthesize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events }),
+    }).then(r => r.json()).then(data => sendResponse(data)).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (message.type === 'RECORDER_EVENT' && self.isRecording) {
+    self.recordedEvents = self.recordedEvents || [];
+    self.recordedEvents.push(message.event);
+  }
+  if (message.type === 'GET_RECORDING_STATUS') {
+    sendResponse({ isRecording: self.isRecording || false, eventCount: (self.recordedEvents || []).length });
   }
 });
 
@@ -127,7 +167,11 @@ async function runDomActionsOnTab(tabId, domActions) {
     domActions = [{ type: 'read', target: 'page' }];
   }
 
-  // Inject content script first (idempotent)
+  // Inject content scripts first (idempotent)
+  // Module 8: state-injector-content.js must load before executor-content.js
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['state-injector-content.js'] });
+  } catch (_) { /* already injected */ }
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['executor-content.js'] });
   } catch (_) { /* already injected */ }

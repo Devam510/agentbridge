@@ -8,6 +8,7 @@
 import { executeHybrid } from './hybrid-router.js';
 import { Capability, CapabilityMap } from '../inferrer/capability-map.js';
 import { buildActionSequence } from './sequence-builder.js';
+import { recordSuccess, queryGraph } from '../routing-graph/agentic-router.js';
 
 export interface ExecuteOptions {
   capabilityId: string;
@@ -162,6 +163,15 @@ export class BridgeExecutor {
       }
 
       const result = await response.json();
+
+      // Module 6: If successful, record to the Agentic Routing Graph
+      if (result?.success !== false) {
+        try {
+          const domain = new URL(this.targetUrl).hostname.replace(/^www\./, '');
+          recordSuccess(capability.name, domain, sequence.actions);
+        } catch { /* non-critical */ }
+      }
+
       return result;
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
